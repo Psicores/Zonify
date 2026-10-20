@@ -1,0 +1,58 @@
+import { migrate } from 'drizzle-orm/expo-sqlite/migrator';
+import * as Location from 'expo-location';
+import * as Notifications from 'expo-notifications';
+import * as TaskManager from 'expo-task-manager';
+
+import migrations from '../../drizzle/migrations';
+import { db } from '../db/client';
+import { createRepositories } from '../db/repositories';
+import { handleGeofenceEvent } from './handleEvent';
+import { GEOFENCE_TASK_NAME, type GeofenceEvent } from './model';
+import { showGeofenceNotification } from './service';
+
+// Este módulo se evalúa al cargar el bundle, también cuando el sistema despierta
+// la app cerrada por una geocerca: ahí no se monta ningún componente, así que la
+// tarea y el handler de notificaciones tienen que quedar definidos acá.
+
+interface GeofencingTaskData {
+  eventType: Location.GeofencingEventType;
+  region: Location.LocationRegion;
+}
+
+// Con la app abierta las notificaciones no se muestran salvo que un handler lo pida.
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowBanner: true,
+    shouldShowList: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
+
+TaskManager.defineTask<GeofencingTaskData>(GEOFENCE_TASK_NAME, async ({ data, error }) => {
+  if (error) {
+    console.warn('[geofence] el sistema informó un error:', error.message);
+    return;
+  }
+  const event: GeofenceEvent | null =
+    data.eventType === Location.GeofencingEventType.Enter
+      ? 'enter'
+      : data.eventType === Location.GeofencingEventType.Exit
+        ? 'exit'
+        : null;
+  if (!event) return;
+
+  try {
+    // Si la app se actualizó y el evento llega antes de abrirla, el esquema
+    // podría estar atrasado; migrar ya aplicado no hace nada.
+    await migrate(db, migrations);
+    const outcome = await handleGeofenceEvent(
+      { repos: createRepositories(db), notify: showGeofenceNotification, now: new Date() },
+      event,
+      data.region.identifier,
+    );
+    if (__DEV__) console.log('[geofence]', event, data.region.identifier, outcome);
+  } catch (e) {
+    console.warn('[geofence] no se pudo procesar el evento:', e);
+  }
+});

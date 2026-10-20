@@ -1,13 +1,14 @@
 {
   "expo": {
     "name": "Zonify",
-    "slug": "Zonify",
+    "slug": "zonify",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.zonify.app"
     },
     "android": {
       "adaptiveIcon": {
@@ -16,10 +17,36 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "package": "com.zonify.app"
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      "expo-sqlite",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Zonify usa tu ubicación para avisarte cuando llegas o sales de un lugar donde tienes tareas pendientes.",
+          "locationAlwaysAndWhenInUsePermission": "Zonify necesita tu ubicación todo el tiempo para avisarte de tus tareas al llegar o salir de un lugar, incluso con la app cerrada. Tu ubicación se procesa en el teléfono y no se comparte.",
+          "locationAlwaysPermission": false,
+          "locationFullAccuracyPermission": false,
+          "isIosBackgroundLocationEnabled": true,
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": false,
+          "motionUsagePermission": false
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "enableRemoteNotifications": false
+        }
+      ],
+      "expo-router",
+      "@maplibre/maplibre-react-native"
+    ],
+    "scheme": "zonify"
   }
 }
