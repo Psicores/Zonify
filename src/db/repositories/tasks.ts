@@ -1,6 +1,6 @@
-import { and, desc, eq, inArray, type SQL } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, notExists, type SQL } from 'drizzle-orm';
 
-import { tasks, type NewTask, type Task, type TaskStatus } from '../schema';
+import { geofenceTriggers, tasks, type NewTask, type Task, type TaskStatus } from '../schema';
 import type { AppDatabase } from '../types';
 
 export type TaskUpdate = Partial<Omit<NewTask, 'id' | 'createdAt' | 'updatedAt'>>;
@@ -10,6 +10,26 @@ export interface TaskFilter {
   /** Estados admitidos; se combina con `status` si se indican los dos. */
   statuses?: readonly TaskStatus[];
   categoryId?: number;
+}
+
+/**
+ * Condición de «tarea anclada a un rubro»: pendiente, con categoría y sin
+ * ningún lugar propio activo (el lugar concreto tiene prioridad sobre el rubro).
+ *
+ * @pre Ninguna.
+ * @post Devuelve la condición SQL sobre `tasks`.
+ */
+function categoryAnchoredPending(db: AppDatabase): SQL {
+  return and(
+    eq(tasks.status, 'pending'),
+    isNotNull(tasks.categoryId),
+    notExists(
+      db
+        .select({ id: geofenceTriggers.id })
+        .from(geofenceTriggers)
+        .where(and(eq(geofenceTriggers.taskId, tasks.id), eq(geofenceTriggers.isActive, true))),
+    ),
+  )!;
 }
 
 /**
@@ -68,6 +88,38 @@ export function createTaskRepository(db: AppDatabase) {
         .from(tasks)
         .where(and(...conditions))
         .orderBy(desc(tasks.createdAt), desc(tasks.id));
+    },
+
+    /**
+     * Rubros con alguna tarea pendiente anclada solo al rubro.
+     *
+     * @pre Ninguna.
+     * @post Devuelve, sin repetir, los `categoryId` de las tareas pendientes con
+     *       rubro y sin lugar propio activo; vacío si no hay.
+     */
+    async pendingCategoryIds(): Promise<number[]> {
+      const rows = await db
+        .selectDistinct({ categoryId: tasks.categoryId })
+        .from(tasks)
+        .where(categoryAnchoredPending(db));
+      return rows.map((row) => row.categoryId!);
+    },
+
+    /**
+     * Lista las tareas pendientes ancladas solo a ciertos rubros.
+     *
+     * @pre Ninguna.
+     * @post Devuelve las tareas pendientes cuyo rubro está en `categoryIds` y que
+     *       no tienen lugar propio activo, de la más antigua a la más reciente;
+     *       vacío si `categoryIds` está vacío.
+     */
+    async listPendingInCategories(categoryIds: readonly number[]): Promise<Task[]> {
+      if (categoryIds.length === 0) return [];
+      return db
+        .select()
+        .from(tasks)
+        .where(and(categoryAnchoredPending(db), inArray(tasks.categoryId, [...categoryIds])))
+        .orderBy(tasks.createdAt, tasks.id);
     },
 
     /**

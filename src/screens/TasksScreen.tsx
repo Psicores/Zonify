@@ -12,22 +12,26 @@ import {
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { CategoryChips } from '../components/CategoryChips';
 import { SwipeableRow, type SwipeAction } from '../components/SwipeableRow';
 import { db } from '../db/client';
 import { createRepositories } from '../db/repositories';
-import type { Coordinates } from '../places/geo';
+import { circleBounds, type Coordinates } from '../places/geo';
 import type { Task } from '../db/schema';
 import {
   buildSections,
   buildTaskListItems,
   formatDistance,
   nearestPlaceDistance,
+  nearestPoiByCategory,
+  NEARBY_DISTANCE_METERS,
   selectTab,
   SWIPE_ACTIONS,
   TASK_ACTION_DONE_MESSAGES,
   TASK_ACTION_LABELS,
   TASK_TABS,
   type TaskAction,
+  type NearestPoi,
   type TaskListItem,
   type TaskTab,
 } from '../tasks/list';
@@ -48,11 +52,12 @@ interface UndoState {
 }
 
 /**
- * Pantalla principal: alta rápida de tareas (US-2.1) y listado filtrado
- * (US-2.2). El campo recibe el foco al abrirse, así que guardar una tarea es
- * escribirla y tocar Enter o «Agregar». Debajo, tres pestañas: «Activas»
- * agrupadas por anclaje (lugar, rubro, generales), «Cercanas hoy» y
- * «Completadas». Deslizar una fila la completa (o reactiva) o la archiva.
+ * Pantalla principal: alta rápida de tareas (US-2.1), con rubro opcional
+ * (US-4.1), y listado filtrado (US-2.2). El campo recibe el foco al abrirse,
+ * así que guardar una tarea es escribirla y tocar Enter o «Agregar». Debajo,
+ * tres pestañas: «Activas» agrupadas por anclaje (lugar, rubro, generales),
+ * «Cercanas hoy» y «Completadas». Deslizar una fila la completa (o reactiva)
+ * o la archiva.
  *
  * @pre Se renderiza dentro de `SafeAreaProvider` y con las migraciones aplicadas.
  * @post Cada alta válida crea una tarea en estado `pending`, vacía el campo y
@@ -74,6 +79,7 @@ export function TasksScreen() {
 
   const [tab, setTab] = useState<TaskTab>('active');
   const [text, setText] = useState('');
+  const [categoryId, setCategoryId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [undo, setUndo] = useState<UndoState | null>(null);
   const [scrollEnabled, setScrollEnabled] = useState(true);
@@ -82,12 +88,41 @@ export function TasksScreen() {
   const title = normalizeTaskTitle(text);
 
   const items = useMemo(() => buildTaskListItems(tasks, places, categories), [tasks, places, categories]);
+  // Rubros con tareas pendientes, como texto estable para no repetir la consulta en cada render.
+  const pendingCategoryKey = [
+    ...new Set(
+      items
+        .filter((item) => item.anchor === 'category' && item.task.status === 'pending')
+        .map((item) => item.category!.id),
+    ),
+  ]
+    .sort((a, b) => a - b)
+    .join(',');
+  const [nearestPois, setNearestPois] = useState<ReadonlyMap<number, NearestPoi>>(new Map());
+
+  useEffect(() => {
+    const ids = pendingCategoryKey ? pendingCategoryKey.split(',').map(Number) : [];
+    if (!position || ids.length === 0) return;
+    let cancelled = false;
+    repos.pois
+      .listInBounds(circleBounds(position, NEARBY_DISTANCE_METERS), ids)
+      .then((pois) => {
+        if (!cancelled) setNearestPois(nearestPoiByCategory(pois, position));
+      })
+      .catch(() => {
+        // Sin caché la pestaña muestra solo las tareas con lugar propio.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [repos, position, pendingCategoryKey]);
+
   const tabItems = useMemo(
-    () => Object.fromEntries(TASK_TABS.map(({ key }) => [key, selectTab(items, key, position)])) as Record<
-      TaskTab,
-      TaskListItem[]
-    >,
-    [items, position],
+    () =>
+      Object.fromEntries(
+        TASK_TABS.map(({ key }) => [key, selectTab(items, key, position, nearestPois)]),
+      ) as Record<TaskTab, TaskListItem[]>,
+    [items, position, nearestPois],
   );
   const sections = useMemo(() => buildSections(tabItems[tab], tab), [tabItems, tab]);
 
@@ -101,16 +136,18 @@ export function TasksScreen() {
    * Guarda el texto actual como tarea nueva.
    *
    * @pre Ninguna.
-   * @post Si hay título y no había otro guardado en curso, la tarea queda creada,
-   *       `text` vacío, `error` en `null` y la pestaña en «Activas»; si falla,
-   *       `error` tiene el mensaje y `text` no cambia. Sin título no hace nada.
+   * @post Si hay título y no había otro guardado en curso, la tarea queda creada
+   *       con el rubro elegido (si hay), `text` vacío, el rubro sin elegir,
+   *       `error` en `null` y la pestaña en «Activas»; si falla, `error` tiene el
+   *       mensaje y ni `text` ni el rubro cambian. Sin título no hace nada.
    */
   const save = useCallback(async () => {
     if (!title || saving.current) return;
     saving.current = true;
     try {
-      await repos.tasks.create({ title });
+      await repos.tasks.create({ title, categoryId });
       setText('');
+      setCategoryId(null);
       setError(null);
       setTab('active');
     } catch (e) {
@@ -118,7 +155,7 @@ export function TasksScreen() {
     } finally {
       saving.current = false;
     }
-  }, [repos, title]);
+  }, [repos, title, categoryId]);
 
   /**
    * Aplica una acción de deslizamiento a una tarea.
@@ -211,6 +248,7 @@ export function TasksScreen() {
             <Text style={styles.buttonText}>Agregar</Text>
           </Pressable>
         </View>
+        <CategoryChips categories={categories} selectedId={categoryId} onChange={setCategoryId} />
         {error && <Text style={styles.error}>{error}</Text>}
 
         <View style={styles.tabs} accessibilityRole="tablist">
@@ -253,7 +291,11 @@ export function TasksScreen() {
             onPress={() => router.push(`/tasks/${item.task.id}/place`)}
             pressHint="Abre el mapa para elegir el lugar de la tarea"
           >
-            <TaskRow item={item} position={tab === 'nearby' ? position : null} />
+            <TaskRow
+              item={item}
+              position={tab === 'nearby' ? position : null}
+              nearestPois={tab === 'nearby' ? nearestPois : null}
+            />
           </SwipeableRow>
         )}
         scrollEnabled={scrollEnabled}
@@ -321,10 +363,20 @@ function emptyMessage(tab: TaskTab, positionStatus: PositionStatus): string {
  *
  * @pre Ninguna.
  * @post Con lugares: sus nombres y, si hay `position`, la distancia al más cercano.
- *       Con rubro: el nombre del rubro. Generales: `null`.
+ *       Con rubro: ícono y nombre del rubro y, si `nearestPois` tiene su local
+ *       más cercano, el nombre de ese local y la distancia. Generales: `null`.
  */
-function anchorDetail(item: TaskListItem, position: Coordinates | null): string | null {
-  if (item.anchor === 'category') return item.category?.name ?? null;
+function anchorDetail(
+  item: TaskListItem,
+  position: Coordinates | null,
+  nearestPois: ReadonlyMap<number, NearestPoi> | null,
+): string | null {
+  if (item.anchor === 'category') {
+    if (!item.category) return null;
+    const label = [item.category.icon, item.category.name].filter(Boolean).join(' ');
+    const nearest = nearestPois?.get(item.category.id);
+    return nearest ? `${label} · ${nearest.name ?? 'Local'} ${formatDistance(nearest.distance)}` : label;
+  }
   if (item.anchor === 'general') return null;
   const names = item.places.map((place) => place.name).join(', ');
   const distance = nearestPlaceDistance(item, position);
@@ -338,8 +390,16 @@ function anchorDetail(item: TaskListItem, position: Coordinates | null): string 
  * @post Muestra el título completo, el detalle de `anchorDetail` si lo hay y la
  *       etiqueta del estado (p. ej. «Activa»).
  */
-function TaskRow({ item, position }: { item: TaskListItem; position: Coordinates | null }) {
-  const detail = anchorDetail(item, position);
+function TaskRow({
+  item,
+  position,
+  nearestPois,
+}: {
+  item: TaskListItem;
+  position: Coordinates | null;
+  nearestPois: ReadonlyMap<number, NearestPoi> | null;
+}) {
+  const detail = anchorDetail(item, position, nearestPois);
   const completed = item.task.status === 'completed';
   return (
     <View style={styles.row}>

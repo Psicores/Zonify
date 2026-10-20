@@ -3,6 +3,7 @@ import { createCategoryRepository } from './categories';
 import { createGeofenceTriggerRepository } from './geofenceTriggers';
 import { createLocationTargetRepository } from './locationTargets';
 import { createNotificationLogRepository } from './notificationLogs';
+import { createPoiRepository } from './pois';
 import { createTaskPlaceRepository } from './taskPlaces';
 import { createTaskRepository } from './tasks';
 
@@ -21,6 +22,7 @@ export function createRepositories(db: AppDatabase) {
     geofenceTriggers: createGeofenceTriggerRepository(db),
     notificationLogs: createNotificationLogRepository(db),
     taskPlaces: createTaskPlaceRepository(db),
+    pois: createPoiRepository(db),
   };
 }
 

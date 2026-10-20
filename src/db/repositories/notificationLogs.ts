@@ -82,6 +82,23 @@ export function createNotificationLogRepository(db: AppDatabase) {
     },
 
     /**
+     * Momento del último aviso de una tarea que llegó a mostrarse o programarse.
+     *
+     * @pre Ninguna.
+     * @post Devuelve el `firedAt` más reciente de `taskId` sin contar los de
+     *       `status = 'failed'`, o `null` si no hay ninguno.
+     */
+    async lastFiredAtForTask(taskId: number): Promise<Date | null> {
+      const [row] = await db
+        .select({ firedAt: notificationLogs.firedAt })
+        .from(notificationLogs)
+        .where(and(eq(notificationLogs.taskId, taskId), ne(notificationLogs.status, 'failed')))
+        .orderBy(desc(notificationLogs.firedAt))
+        .limit(1);
+      return row?.firedAt ?? null;
+    },
+
+    /**
      * Cambia el estado de una notificación.
      *
      * @pre Ninguna.

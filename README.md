@@ -38,7 +38,7 @@ la configuración nativa vive en `app.json`.
 ## Base de datos local
 
 - Esquema: [`src/db/schema.ts`](src/db/schema.ts) — `categories`, `location_targets`, `tasks`,
-  `geofence_triggers`, `notification_logs`.
+  `geofence_triggers`, `notification_logs`, `pois` y `poi_areas` (caché de locales por rubro).
 - Migraciones: [`drizzle/`](drizzle/) (generadas, no editar a mano). Se aplican al arrancar en
   el layout raíz [`src/app/_layout.tsx`](src/app/_layout.tsx) con `useMigrations`.
 - Repositorios: [`src/db/repositories/`](src/db/repositories/), independientes del driver.
@@ -99,9 +99,9 @@ Debajo del alta hay tres pestañas (US-2.2), con el contador de cada una:
   activo; gana si además tiene rubro), *Por rubro* (tiene categoría) y *Generales*.
 - **Cercanas hoy**: tareas pendientes ancladas a un lugar donde el usuario está dentro de la
   geocerca (`lastState = 'inside'`) o que están a ≤ 1 km (o al radio de la geocerca, si es mayor)
-  de la posición actual, de la más cercana a la más lejana. La posición se lee al abrir la app y
-  al entrar en la pestaña (última conocida de ≤ 5 min o un fix de precisión media). Las tareas por
-  rubro no aparecen: todavía no tienen coordenadas.
+  de la posición actual, y tareas por rubro con un local de su rubro a ≤ 1 km según el caché de
+  POIs; de la más cercana a la más lejana. La posición se lee al abrir la app y al entrar en la
+  pestaña (última conocida de ≤ 5 min o un fix de precisión media).
 - **Completadas**: de la completada más recientemente a la más antigua.
 
 Deslizar una fila a la derecha la completa (en *Completadas*, la reactiva) y a la izquierda la
@@ -167,12 +167,73 @@ Las geocercas nativas se registran con `expo-location` (`startGeofencingAsync`, 
 - **Reinicio y actualización**: `expo-task-manager` vuelve a registrar la tarea al reiniciar el
   teléfono (`BOOT_COMPLETED`) y al actualizar la app.
 
+## Rubros (épica 4)
+
+### Catálogo y selección (US-4.1)
+
+El catálogo vive en código ([`src/categories/catalog.ts`](src/categories/catalog.ts)) con sus
+etiquetas de OpenStreetMap, y al arrancar se guarda en `categories` por `slug`
+([`seed.ts`](src/categories/seed.ts); si el usuario ya tenía una categoría con el mismo nombre,
+se adopta):
+
+| Rubro | Etiquetas OSM |
+| --- | --- |
+| Farmacia | `amenity=pharmacy` |
+| Mascotas / Veterinaria | `shop=pet`, `amenity=veterinary` |
+| Supermercado / Almacén | `shop=supermarket`, `shop=convenience` |
+| Gimnasio | `leisure=fitness_centre` |
+| Cine | `amenity=cinema` |
+
+Al crear una tarea, una fila de chips ([`CategoryChips`](src/components/CategoryChips.tsx))
+permite elegir un rubro opcional (selección única; tocar el elegido lo quita). Para lectores de
+pantalla son un `radiogroup` con el nombre del rubro como etiqueta; el emoji es decorativo. Si una
+tarea tiene lugar propio y rubro, gana el lugar.
+
+### Caché de POIs (US-4.3)
+
+[`src/pois/`](src/pois/) descarga de [Overpass](https://wiki.openstreetmap.org/wiki/Overpass_API)
+los locales del catálogo en un círculo de 3 km alrededor de la última posición conocida (la de
+la última hora, normalmente donde se carga el teléfono) y los guarda en `pois` / `poi_areas`:
+
+- **Cuándo**: con Wi-Fi y cargando si la zona tiene más de 7 días; con Wi-Fi aunque no cargue si
+  la zona no está descargada (sin ella los recordatorios por rubro no funcionan). Nunca con datos
+  móviles. Se intenta al abrir la app, al volver a primer plano y en la tarea periódica
+  `zonify-poi-sync` (`expo-background-task`: WorkManager en Android, BGTaskScheduler en iOS, cada
+  ≥ 6 h según decida el sistema).
+- **Consulta**: una cláusula por clave OSM con regex de valores sobre un bounding box (mucho más
+  rápida que `around`), nodos, vías y relaciones con su centro. Se prueban varias instancias
+  públicas en orden. Una respuesta cortada por tiempo (`remark` de error) se descarta para no
+  borrar locales válidos.
+- **Guardado**: en una transacción; los locales conservan su id al refrescar y los que ya no
+  vuelven en la zona se borran. Lo descargado hace más de 60 días se elimina. Cambiar las
+  etiquetas del catálogo invalida las zonas (`catalog_signature`).
+
+### Rotación dinámica de geocercas (US-4.2)
+
+`syncGeofences` planifica con [`planRegions`](src/geofencing/model.ts) y registra:
+
+- **Locales por rubro**: si hay tareas pendientes ancladas solo a un rubro, hasta 15 locales del
+  caché a ≤ 2 km, alternando rubros (el más cercano de cada uno, después el segundo…) para que un
+  rubro denso no tape a otro. Radio de 100 m; avisan solo al entrar.
+- **Centinela**: una geocerca de 500 m centrada en el usuario que avisa al salir. Al moverse
+  > 500 m el sistema despierta la app (geofencing de bajo consumo: celdas y Wi-Fi), que vuelve a
+  elegir los locales alrededor de la nueva posición y re-registra todo, también en segundo plano o
+  con la app cerrada. Mientras el usuario esté a < 200 m del centro registrado se conserva, para
+  no re-registrar por el ruido del GPS.
+- **Límite**: nunca más de 18 regiones en iOS (20 del sistema con margen) y 100 en Android. Si no
+  alcanza, se reservan al menos 5 lugares para locales y el resto para los lugares propios más
+  cercanos.
+- **Aviso**: al entrar al radio de un local se avisan juntas las tareas pendientes de sus rubros
+  («2 tareas cerca — Farmacity: …»), salvo las avisadas en la última hora (pasar por varias
+  farmacias seguidas no repite el aviso).
+
 **Latencia**: el criterio de aceptación pide < 60 s. Android documenta una latencia típica de
 ~2 minutos para geocercas, mayor con el teléfono quieto o en Doze; `expo-location` usa la
 responsiveness por defecto del sistema. Hay que medirlo en el dispositivo; si no alcanza, se puede
 reforzar (p. ej. con actualizaciones de ubicación en segundo plano mientras haya tareas cerca).
 
-MapLibre, `react-native-screens`, Expo Router y `expo-task-manager` incluyen código nativo: después de actualizar hay que
+MapLibre, `react-native-screens`, Expo Router, `expo-task-manager`, `expo-background-task` y
+`expo-network` incluyen código nativo: después de actualizar hay que
 recompilar el dev build (`npm run android` o EAS).
 
 La pantalla de diagnóstico de la base ([`src/screens/DatabaseDiagnosticsScreen.tsx`](src/screens/DatabaseDiagnosticsScreen.tsx))

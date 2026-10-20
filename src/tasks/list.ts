@@ -1,4 +1,4 @@
-import type { Category, GeofenceTrigger, LocationTarget, Task } from '../db/schema';
+import type { Category, GeofenceTrigger, LocationTarget, Poi, Task } from '../db/schema';
 import { distanceMeters, type Coordinates } from '../places/geo';
 
 export type TaskTab = 'active' | 'nearby' | 'completed';
@@ -120,18 +120,69 @@ export function nearestPlaceDistance(item: TaskListItem, position: Coordinates |
   return Math.min(...item.places.map((place) => distanceMeters(position, place)));
 }
 
+/** Local más cercano de un rubro, según el caché de POIs. */
+export interface NearestPoi {
+  name: string | null;
+  distance: number;
+}
+
+/**
+ * Local más cercano de cada rubro.
+ *
+ * @pre Ninguna.
+ * @post Devuelve, por cada `categoryId` presente en `pois`, el local a menor
+ *       distancia de `position` con su nombre y distancia en metros.
+ */
+export function nearestPoiByCategory(
+  pois: readonly Poi[],
+  position: Coordinates,
+): Map<number, NearestPoi> {
+  const result = new Map<number, NearestPoi>();
+  for (const poi of pois) {
+    const distance = distanceMeters(position, poi);
+    const current = result.get(poi.categoryId);
+    if (!current || distance < current.distance) result.set(poi.categoryId, { name: poi.name, distance });
+  }
+  return result;
+}
+
+/**
+ * Distancia a la que está una tarea: a su lugar más cercano o, si es por rubro,
+ * al local más cercano de su rubro.
+ *
+ * @pre Ninguna.
+ * @post Devuelve los metros, o `null` si no hay posición ni dato del rubro.
+ */
+export function taskDistance(
+  item: TaskListItem,
+  position: Coordinates | null,
+  nearestPois: ReadonlyMap<number, NearestPoi>,
+): number | null {
+  if (item.anchor === 'category' && item.category) return nearestPois.get(item.category.id)?.distance ?? null;
+  return nearestPlaceDistance(item, position);
+}
+
 /**
  * Indica si una tarea va en «Cercanas hoy».
  *
  * @pre Ninguna.
- * @post Devuelve `true` si la tarea está pendiente, está anclada a algún lugar y,
- *       o el usuario está dentro de una de sus geocercas, o la posición actual
- *       está a `NEARBY_DISTANCE_METERS` (o al radio de la geocerca, si es mayor)
- *       de alguno de sus lugares. Las tareas por rubro no cuentan: no tienen
- *       coordenadas.
+ * @post Devuelve `true` si la tarea está pendiente y: anclada a un lugar, el
+ *       usuario está dentro de una de sus geocercas o la posición actual está a
+ *       `NEARBY_DISTANCE_METERS` (o al radio de la geocerca, si es mayor) de
+ *       alguno de sus lugares; anclada a un rubro, el local más cercano de su
+ *       rubro (según `nearestPois`) está a `NEARBY_DISTANCE_METERS` o menos.
  */
-export function isNearby(item: TaskListItem, position: Coordinates | null): boolean {
-  if (item.task.status !== 'pending' || item.anchor !== 'place') return false;
+export function isNearby(
+  item: TaskListItem,
+  position: Coordinates | null,
+  nearestPois: ReadonlyMap<number, NearestPoi> = new Map(),
+): boolean {
+  if (item.task.status !== 'pending') return false;
+  if (item.anchor === 'category') {
+    const distance = taskDistance(item, position, nearestPois);
+    return distance !== null && distance <= NEARBY_DISTANCE_METERS;
+  }
+  if (item.anchor !== 'place') return false;
   if (item.insideAnyPlace) return true;
   if (!position) return false;
   return item.places.some(
@@ -144,23 +195,25 @@ export function isNearby(item: TaskListItem, position: Coordinates | null): bool
  *
  * @pre Ninguna.
  * @post `'active'`: las pendientes, en el orden recibido. `'nearby'`: las que
- *       cumplen `isNearby`, de la más cercana a la más lejana (las que solo se
- *       saben dentro de la geocerca, sin distancia, al principio). `'completed'`:
- *       las completadas, de la completada más recientemente a la más antigua.
- *       Nunca incluye archivadas. No modifica `items`.
+ *       cumplen `isNearby`, de la más cercana a la más lejana según
+ *       `taskDistance` (las que solo se saben dentro de la geocerca, sin
+ *       distancia, al principio). `'completed'`: las completadas, de la
+ *       completada más recientemente a la más antigua. Nunca incluye
+ *       archivadas. No modifica `items`.
  */
 export function selectTab(
   items: readonly TaskListItem[],
   tab: TaskTab,
   position: Coordinates | null,
+  nearestPois: ReadonlyMap<number, NearestPoi> = new Map(),
 ): TaskListItem[] {
   switch (tab) {
     case 'active':
       return items.filter((item) => item.task.status === 'pending');
     case 'nearby':
       return items
-        .filter((item) => isNearby(item, position))
-        .map((item) => ({ item, distance: nearestPlaceDistance(item, position) ?? -1 }))
+        .filter((item) => isNearby(item, position, nearestPois))
+        .map((item) => ({ item, distance: taskDistance(item, position, nearestPois) ?? -1 }))
         .sort((a, b) => a.distance - b.distance)
         .map(({ item }) => item);
     case 'completed':

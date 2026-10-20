@@ -51,9 +51,14 @@ export const categories = sqliteTable(
     name: text('name').notNull(),
     color: text('color'),
     icon: text('icon'),
+    // Rubro del catálogo (src/categories/catalog.ts); null en categorías propias del usuario.
+    slug: text('slug'),
     ...timestamps,
   },
-  (t) => [uniqueIndex('categories_name_unique').on(t.name)],
+  (t) => [
+    uniqueIndex('categories_name_unique').on(t.name),
+    uniqueIndex('categories_slug_unique').on(t.slug),
+  ],
 );
 
 export const locationTargets = sqliteTable(
@@ -129,6 +134,50 @@ export const geofenceTriggers = sqliteTable(
   ],
 );
 
+// Caché local de locales de OpenStreetMap por rubro (US-4.3). Un mismo local
+// puede figurar en más de un rubro: hay una fila por (local, rubro).
+export const pois = sqliteTable(
+  'pois',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    // Tipo y id del elemento de OSM, p. ej. `n474553860` o `w53860890`.
+    osmKey: text('osm_key').notNull(),
+    categoryId: integer('category_id')
+      .notNull()
+      .references(() => categories.id, { onDelete: 'cascade' }),
+    name: text('name'),
+    address: text('address'),
+    latitude: real('latitude').notNull(),
+    longitude: real('longitude').notNull(),
+    fetchedAt: integer('fetched_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (t) => [
+    uniqueIndex('pois_osm_category_unique').on(t.osmKey, t.categoryId),
+    index('pois_category_latitude_idx').on(t.categoryId, t.latitude),
+    check('pois_latitude_range', sql`${t.latitude} BETWEEN -90 AND 90`),
+    check('pois_longitude_range', sql`${t.longitude} BETWEEN -180 AND 180`),
+  ],
+);
+
+// Zonas circulares ya descargadas al caché de POIs.
+export const poiAreas = sqliteTable(
+  'poi_areas',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    centerLatitude: real('center_latitude').notNull(),
+    centerLongitude: real('center_longitude').notNull(),
+    radiusMeters: real('radius_meters').notNull(),
+    // Resumen de las etiquetas del catálogo usadas; si el catálogo cambia, la zona se vuelve a bajar.
+    catalogSignature: text('catalog_signature').notNull(),
+    poiCount: integer('poi_count').notNull(),
+    fetchedAt: integer('fetched_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (t) => [
+    index('poi_areas_fetched_at_idx').on(t.fetchedAt),
+    check('poi_areas_radius_positive', sql`${t.radiusMeters} > 0`),
+  ],
+);
+
 // El historial sobrevive al borrado de la tarea o del trigger (FK set null).
 export const notificationLogs = sqliteTable(
   'notification_logs',
@@ -156,6 +205,11 @@ export const notificationLogs = sqliteTable(
 
 export const categoriesRelations = relations(categories, ({ many }) => ({
   tasks: many(tasks),
+  pois: many(pois),
+}));
+
+export const poisRelations = relations(pois, ({ one }) => ({
+  category: one(categories, { fields: [pois.categoryId], references: [categories.id] }),
 }));
 
 export const tasksRelations = relations(tasks, ({ one, many }) => ({
@@ -193,5 +247,9 @@ export type Task = typeof tasks.$inferSelect;
 export type NewTask = typeof tasks.$inferInsert;
 export type GeofenceTrigger = typeof geofenceTriggers.$inferSelect;
 export type NewGeofenceTrigger = typeof geofenceTriggers.$inferInsert;
+export type Poi = typeof pois.$inferSelect;
+export type NewPoi = typeof pois.$inferInsert;
+export type PoiArea = typeof poiAreas.$inferSelect;
+export type NewPoiArea = typeof poiAreas.$inferInsert;
 export type NotificationLog = typeof notificationLogs.$inferSelect;
 export type NewNotificationLog = typeof notificationLogs.$inferInsert;

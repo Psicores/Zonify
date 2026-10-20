@@ -3,6 +3,9 @@ export interface Coordinates {
   longitude: number;
 }
 
+/** Rectángulo `[oeste, sur, este, norte]` en grados. */
+export type Bounds = [west: number, south: number, east: number, north: number];
+
 /** Polígono GeoJSON (RFC 7946) con un solo anillo; compatible con las fuentes de MapLibre. */
 export interface PolygonFeature {
   type: 'Feature';
@@ -98,7 +101,7 @@ export function circlePolygon(
  * @pre `radiusMeters` > 0 y el círculo no cruza el antimeridiano ni los polos.
  * @post Devuelve `[oeste, sur, este, norte]` en grados.
  */
-export function circleBounds(center: Coordinates, radiusMeters: number): [number, number, number, number] {
+export function circleBounds(center: Coordinates, radiusMeters: number): Bounds {
   const north = destinationPoint(center, radiusMeters, 0).latitude;
   const south = destinationPoint(center, radiusMeters, 180).latitude;
   const east = destinationPoint(center, radiusMeters, 90).longitude;

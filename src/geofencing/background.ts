@@ -8,7 +8,7 @@ import { db } from '../db/client';
 import { createRepositories } from '../db/repositories';
 import { handleGeofenceEvent } from './handleEvent';
 import { GEOFENCE_TASK_NAME, type GeofenceEvent } from './model';
-import { showGeofenceNotification } from './service';
+import { showGeofenceNotification, syncGeofences } from './service';
 
 // Este módulo se evalúa al cargar el bundle, también cuando el sistema despierta
 // la app cerrada por una geocerca: ahí no se monta ningún componente, así que la
@@ -46,8 +46,15 @@ TaskManager.defineTask<GeofencingTaskData>(GEOFENCE_TASK_NAME, async ({ data, er
     // Si la app se actualizó y el evento llega antes de abrirla, el esquema
     // podría estar atrasado; migrar ya aplicado no hace nada.
     await migrate(db, migrations);
+    const repos = createRepositories(db);
     const outcome = await handleGeofenceEvent(
-      { repos: createRepositories(db), notify: showGeofenceNotification, now: new Date() },
+      {
+        repos,
+        notify: showGeofenceNotification,
+        // Al salir de la centinela: nuevas geocercas de rubro alrededor de la posición actual.
+        replan: () => syncGeofences(repos),
+        now: new Date(),
+      },
       event,
       data.region.identifier,
     );
