@@ -1,6 +1,7 @@
 import * as Notifications from 'expo-notifications';
 import * as TaskManager from 'expo-task-manager';
 
+import { eventQueue } from '../background/serial';
 import { db } from '../db/client';
 import { ensureMigrated } from '../db/migrate';
 import { createRepositories } from '../db/repositories';
@@ -21,16 +22,20 @@ TaskManager.defineTask<Notifications.NotificationTaskPayload>(
     try {
       await ensureMigrated();
       const repos = createRepositories(db);
-      const outcome = await handleAlertAction(
-        {
-          repos,
-          resync: () => syncGeofences(repos),
-          dismiss: Notifications.dismissNotificationAsync,
-          now: new Date(),
-        },
-        data.actionIdentifier,
-        data.notification.request.content.data,
-        data.notification.request.identifier,
+      // En la misma cola que los eventos de geocercas (US-2.1): un aviso que
+      // llega mientras se completa o pospone una tarea ve el cambio ya hecho.
+      const outcome = await eventQueue(() =>
+        handleAlertAction(
+          {
+            repos,
+            resync: () => syncGeofences(repos),
+            dismiss: Notifications.dismissNotificationAsync,
+            now: new Date(),
+          },
+          data.actionIdentifier,
+          data.notification.request.content.data,
+          data.notification.request.identifier,
+        ),
       );
       if (__DEV__) console.log('[avisos] acción en segundo plano', data.actionIdentifier, outcome);
     } catch (e) {

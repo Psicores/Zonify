@@ -17,6 +17,7 @@ import { CategoryChips } from '../components/CategoryChips';
 import { db } from '../db/client';
 import { createRepositories } from '../db/repositories';
 import type { Category, LocationTarget, Task } from '../db/schema';
+import { usePermissions } from '../permissions/PermissionsProvider';
 import {
   ALL_DAYS_MASK,
   DEFAULT_END_MINUTE,
@@ -86,6 +87,7 @@ function TaskDetailForm({ task, place, categories }: TaskDetailFormProps) {
   const repos = useMemo(() => createRepositories(db), []);
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const { askFor: askForPermissions } = usePermissions();
 
   const [categoryId, setCategoryId] = useState(task.categoryId);
   const [hoursEnabled, setHoursEnabled] = useState(task.alertStartMinute !== null);
@@ -119,7 +121,8 @@ function TaskDetailForm({ task, place, categories }: TaskDetailFormProps) {
    * @pre Ninguna.
    * @post Si las horas son válidas (o la franja está apagada) y hay al menos un
    *       día, guarda el rubro y la ventana (días `null` si son todos) y vuelve
-   *       atrás; si no, `error` explica qué corregir y no guarda nada.
+   *       atrás; si no, `error` explica qué corregir y no guarda nada. Una tarea
+   *       con rubro abre el pedido de permisos de avisos (US-3.1).
    */
   const save = async () => {
     const start = hoursEnabled ? parseTime(startText) : null;
@@ -143,6 +146,7 @@ function TaskDetailForm({ task, place, categories }: TaskDetailFormProps) {
         alertEndMinute: end,
         alertDays: days === ALL_DAYS_MASK ? null : days,
       });
+      if (categoryId !== null) askForPermissions('alerts');
       router.back();
     } catch (e) {
       setError(`No se pudo guardar: ${e instanceof Error ? e.message : String(e)}`);

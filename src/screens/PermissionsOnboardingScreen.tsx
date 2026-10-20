@@ -1,15 +1,22 @@
-import type { ReactNode } from 'react';
+import { useEffect } from 'react';
 import { ActivityIndicator, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { groupOf, type BatteryStatus, type OnboardingStep, type PermissionGroup } from '../permissions/model';
+import {
+  groupOf,
+  type BatteryStatus,
+  type OnboardingStep,
+  type PermissionDemand,
+  type PermissionGroup,
+} from '../permissions/model';
+import { usePermissions } from '../permissions/PermissionsProvider';
 import {
   openAppSettings,
   openBatteryOptimizationSettings,
   openPowerSaverSettings,
   openVendorGuide,
 } from '../permissions/service';
-import { usePermissionFlow, type PermissionFlow } from '../permissions/usePermissionFlow';
+import type { PermissionFlow } from '../permissions/usePermissionFlow';
 
 type PendingStep = Exclude<OnboardingStep, 'done'>;
 
@@ -31,58 +38,63 @@ const GROUPS: PermissionGroup[] =
   Platform.OS === 'android' ? ['location', 'notifications', 'battery'] : ['location', 'notifications'];
 
 /**
- * Muestra el onboarding de permisos mientras quede alguno pendiente y, cuando
- * no queda ninguno, la app.
+ * Modal del pedido de permisos abierto (US-1.2, US-3.1). Es la pantalla de la
+ * ruta protegida `/permissions`: solo existe mientras `prompting` es `true`.
  *
- * @pre Se renderiza dentro de `SafeAreaProvider`.
- * @post Mientras lee el estado inicial muestra un indicador de carga; si esa
- *       lectura falla, muestra `children` para no bloquear la app. Si el usuario
- *       revoca un permiso en Ajustes, el onboarding vuelve a aparecer al regresar.
+ * @pre Se renderiza dentro de `PermissionsProvider` y de `SafeAreaProvider`.
+ * @post Muestra el paso pendiente del pedido; cuando se resuelve (permiso
+ *       concedido o «Ahora no») la ruta deja de estar habilitada y Expo Router
+ *       la cierra. Al desmontarse cierra el pedido: si el usuario salió con
+ *       «atrás» sin resolverlo, cuenta como «Ahora no».
  */
-export function PermissionGate({ children }: { children: ReactNode }) {
-  const flow = usePermissionFlow();
+export function PermissionsOnboardingScreen() {
+  const flow = usePermissions();
+  const { release } = flow;
 
-  if (flow.step === null || flow.snapshot === null) {
-    if (flow.error) return children;
+  useEffect(() => release, [release]);
+
+  if (!flow.snapshot || !flow.demand || !flow.step || flow.step === 'done') {
     return (
       <View style={styles.center}>
         <ActivityIndicator />
       </View>
     );
   }
-
-  if (flow.step === 'done') return children;
-
-  return <PermissionsOnboardingScreen flow={flow} step={flow.step} battery={flow.snapshot.battery} />;
+  return <PermissionStep flow={flow} demand={flow.demand} step={flow.step} battery={flow.snapshot.battery} />;
 }
 
 /**
- * Pantalla de un paso del onboarding (US-1.2): explica para qué se usa el
- * permiso antes de mostrar el diálogo nativo, y ofrece ir a Ajustes cuando el
- * sistema ya no permite volver a pedirlo.
+ * Un paso del pedido: explica para qué se usa el permiso antes de mostrar el
+ * diálogo nativo, y ofrece ir a Ajustes cuando el sistema ya no permite volver
+ * a pedirlo.
  *
- * @pre `step` es `resolveStep` del snapshot de `flow`, y `battery` es su estado de batería.
- * @post Muestra el progreso, el texto y las acciones del paso; mientras hay una
- *       solicitud en curso, las acciones están deshabilitadas.
+ * @pre `step` es el paso pendiente de `demand`, y `battery` el estado de batería del snapshot.
+ * @post Muestra el progreso (solo en el pedido de avisos, que tiene varios
+ *       pasos), el texto y las acciones del paso; mientras hay una solicitud en
+ *       curso, las acciones están deshabilitadas.
  */
-function PermissionsOnboardingScreen({
+function PermissionStep({
   flow,
+  demand,
   step,
   battery,
 }: {
   flow: PermissionFlow;
+  demand: PermissionDemand;
   step: PendingStep;
   battery: BatteryStatus;
 }) {
-  const content = stepContent(step, flow, battery);
+  const content = stepContent(step, demand, flow, battery);
   const position = GROUPS.indexOf(groupOf(step)) + 1;
 
   return (
     <SafeAreaView style={styles.container}>
       <ScrollView contentContainerStyle={styles.content}>
-        <Text style={styles.progress}>
-          Paso {position} de {GROUPS.length}
-        </Text>
+        {demand === 'alerts' && (
+          <Text style={styles.progress}>
+            Paso {position} de {GROUPS.length}
+          </Text>
+        )}
         <Text style={styles.title}>{content.title}</Text>
 
         {content.body.map((paragraph) => (
@@ -124,9 +136,15 @@ function PermissionsOnboardingScreen({
  *
  * @pre Ninguna.
  * @post Devuelve un contenido con al menos una acción; la última siempre
- *       permite posponer el grupo del paso.
+ *       permite posponer el grupo del paso. La ubicación se explica según el
+ *       pedido: para el mapa o para los avisos con la app cerrada.
  */
-function stepContent(step: PendingStep, flow: PermissionFlow, battery: BatteryStatus): StepContent {
+function stepContent(
+  step: PendingStep,
+  demand: PermissionDemand,
+  flow: PermissionFlow,
+  battery: BatteryStatus,
+): StepContent {
   const settings: StepAction = {
     label: 'Abrir Ajustes',
     onPress: () => flow.openSettings(openAppSettings),
@@ -146,6 +164,19 @@ function stepContent(step: PendingStep, flow: PermissionFlow, battery: BatterySt
 
   switch (step) {
     case 'intro':
+      if (demand === 'location') {
+        return {
+          title: 'Ubicación para el mapa',
+          body: [
+            'Con tu ubicación, el mapa se abre donde estás y la búsqueda muestra primero los lugares cercanos.',
+            'Solo se usa mientras tienes Zonify abierta, y se procesa en el teléfono: no la compartimos con nadie. También puedes buscar un lugar sin darla.',
+          ],
+          actions: [
+            { label: 'Permitir ubicación', onPress: flow.requestForeground, kind: 'primary' },
+            skip('Ahora no'),
+          ],
+        };
+      }
       return {
         title: 'Avisos al llegar a cada lugar',
         body: [
@@ -163,13 +194,21 @@ function stepContent(step: PendingStep, flow: PermissionFlow, battery: BatterySt
       return {
         title: 'La ubicación está desactivada para Zonify',
         body: [
-          'Sin ubicación, Zonify no puede saber cuándo llegas a tus lugares, y el sistema ya no permite volver a pedir el permiso desde la app.',
+          demand === 'location'
+            ? 'Sin ubicación, el mapa no puede mostrarte dónde estás, y el sistema ya no permite volver a pedir el permiso desde la app.'
+            : 'Sin ubicación, Zonify no puede saber cuándo llegas a tus lugares, y el sistema ya no permite volver a pedir el permiso desde la app.',
         ],
-        hint: Platform.select({
-          ios: 'En Ajustes, toca «Ubicación» y elige «Siempre».',
-          default: 'En Ajustes, toca «Permisos» › «Ubicación» y elige «Permitir todo el tiempo».',
-        }),
-        actions: [settings, skip('Continuar sin alertas')],
+        hint:
+          demand === 'location'
+            ? Platform.select({
+                ios: 'En Ajustes, toca «Ubicación» y elige «Al usar la app».',
+                default: 'En Ajustes, toca «Permisos» › «Ubicación» y elige «Permitir solo con la app en uso».',
+              })
+            : Platform.select({
+                ios: 'En Ajustes, toca «Ubicación» y elige «Siempre».',
+                default: 'En Ajustes, toca «Permisos» › «Ubicación» y elige «Permitir todo el tiempo».',
+              }),
+        actions: [settings, skip(demand === 'location' ? 'Continuar sin ubicación' : 'Continuar sin alertas')],
       };
 
     case 'precise-required':
@@ -187,7 +226,7 @@ function stepContent(step: PendingStep, flow: PermissionFlow, battery: BatterySt
 
     case 'background':
       return {
-        title: 'Último paso: ubicación todo el tiempo',
+        title: 'Ubicación todo el tiempo',
         body: [
           'Para avisarte aunque Zonify esté cerrada, el sistema tiene que dejarle ver tu ubicación en segundo plano. Solo la usamos para detectar tus lugares, no para registrar tu recorrido.',
         ],

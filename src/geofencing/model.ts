@@ -1,4 +1,4 @@
-import type { GeofenceState, GeofenceTrigger, LocationTarget, Poi, Task } from '../db/schema';
+import type { GeofenceState, GeofenceTrigger, LocationTarget, Poi, PoiArea, Task } from '../db/schema';
 import { distanceMeters, type Coordinates } from '../places/geo';
 
 /** Nombre de la tarea de fondo que recibe las transiciones de geocerca. */
@@ -268,6 +268,40 @@ export function planningCenter(registered: unknown, position: Coordinates): Coor
   if (typeof sentinel?.latitude !== 'number' || typeof sentinel.longitude !== 'number') return position;
   const center = { latitude: sentinel.latitude, longitude: sentinel.longitude };
   return distanceMeters(center, position) < SENTINEL_KEEP_CENTER_METERS ? center : position;
+}
+
+/**
+ * Huella de lo que puede cambiar las geocercas registradas (US-2.2).
+ *
+ * @pre Ninguna (cada lista puede no haber cargado todavía).
+ * @post Devuelve el mismo texto mientras no cambien: qué tareas están
+ *       pendientes y con qué rubro, qué triggers están armados con qué
+ *       transición, centro y radio, y cuándo se descargó cada zona del caché de
+ *       POIs. Títulos, horarios, posposiciones y el último estado de cada
+ *       geocerca (`lastState`) no la cambian. Van las tareas pendientes y no
+ *       solo sus rubros: la consulta en vivo de triggers solo escucha su propia
+ *       tabla, y completar una tarea con lugar se nota en la de tareas.
+ */
+export function geofenceWatchKey(
+  pending: readonly Pick<Task, 'id' | 'categoryId'>[] | undefined,
+  armed:
+    | readonly {
+        trigger: Pick<GeofenceTrigger, 'id' | 'transition'>;
+        locationTarget: Pick<LocationTarget, 'latitude' | 'longitude' | 'radiusMeters'>;
+      }[]
+    | undefined,
+  areas: readonly Pick<PoiArea, 'fetchedAt'>[] | undefined,
+): string {
+  return [
+    pending?.map((t) => `${t.id}:${t.categoryId ?? ''}`).join(','),
+    armed
+      ?.map(
+        ({ trigger, locationTarget: l }) =>
+          `${trigger.id}:${trigger.transition}:${l.latitude}:${l.longitude}:${l.radiusMeters}`,
+      )
+      .join(','),
+    areas?.map((a) => a.fetchedAt.getTime()).join(','),
+  ].join('|');
 }
 
 /**

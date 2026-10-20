@@ -68,23 +68,35 @@ SQLite no los admite con `ALTER TABLE`, Drizzle recrea la tabla y, como las migr
 una transacción, el `PRAGMA foreign_keys=OFF` no tiene efecto y el `DROP TABLE` dispara los
 `ON DELETE CASCADE`. Revisar siempre el `.sql` generado antes de commitear.
 
-## Permisos (onboarding)
+## Permisos (contextuales, US-3.1)
 
-Antes de la pantalla principal, `PermissionGate` ([`src/screens/PermissionsOnboardingScreen.tsx`](src/screens/PermissionsOnboardingScreen.tsx))
-guía los permisos en este orden y relee el estado cada vez que la app vuelve a primer plano
-(así detecta lo que el usuario cambió en Ajustes):
+La app abre directamente en la lista de tareas: no hay muro de permisos. Cada permiso se pide
+cuando hace falta, con una explicación antes del diálogo nativo, en un modal
+([`src/screens/PermissionsOnboardingScreen.tsx`](src/screens/PermissionsOnboardingScreen.tsx)):
 
-1. Ubicación en primer plano, tras una explicación de para qué se usa «todo el tiempo».
-2. Ubicación precisa (sin ella no se disparan las geocercas).
-3. Elevación a background (`ACCESS_BACKGROUND_LOCATION` / «Siempre»). Si se rechaza, se muestra
-   un estado explicativo con enlace a Ajustes.
-4. Notificaciones locales (`POST_NOTIFICATIONS` en Android 13+; antes se crea el canal `zone-alerts`).
-5. Solo Android: optimización de batería y ahorro de energía activos, con enlace a cada ajuste y a
-   la guía de [dontkillmyapp.com](https://dontkillmyapp.com) si el fabricante es conocido por cerrar apps.
+| Pedido | Cuándo | Qué pide |
+| --- | --- | --- |
+| `location` | Al abrir el mapa de un lugar | Ubicación en primer plano. El mapa espera la respuesta para abrirse donde está el usuario. |
+| `alerts` | Al guardar una tarea con lugar o con rubro | Ubicación en primer plano (si falta), precisa y en background («Siempre» / `ACCESS_BACKGROUND_LOCATION`); enseguida, notificaciones (`POST_NOTIFICATIONS` en Android 13+) y, en Android, optimización de batería y ahorro de energía (con la guía de [dontkillmyapp.com](https://dontkillmyapp.com) si el fabricante es conocido por cerrar apps). |
 
-Cada grupo se puede posponer hasta el próximo arranque. La lógica de pasos es pura y vive en
-[`src/permissions/model.ts`](src/permissions/model.ts); el acceso a módulos nativos, en
-[`src/permissions/service.ts`](src/permissions/service.ts).
+- **Modal protegido**: la ruta `/permissions` está dentro de `Stack.Protected` en el layout raíz y
+  solo existe mientras hay un pedido abierto al que le falta algún paso. Al concederlo o posponerlo
+  la ruta deja de estar habilitada y Expo Router cierra el modal. Lo abre `PermissionPrompter`
+  ([`src/permissions/PermissionsProvider.tsx`](src/permissions/PermissionsProvider.tsx)) un cuadro
+  después de abrirse el pedido, cuando la ruta ya está habilitada.
+- **«Ahora no»** (o cerrar el modal con «atrás») pospone ese grupo 7 días, guardado en
+  `app_settings` (`permissions.skippedUntil`), así que sobrevive a cerrar la app. Mientras dure, los
+  pedidos automáticos (abrir el mapa, guardar tareas) no lo vuelven a mostrar. Si se pospone la
+  ubicación, el pedido de avisos termina ahí: sin ella las notificaciones no tendrían qué avisar.
+- **Activarlo a pedido** ignora el plazo: «Activar avisos» en Ajustes (que además muestra si los
+  avisos con la app cerrada pueden funcionar) y «Activar ubicación» en el mapa.
+- El estado se relee cada vez que la app vuelve a primer plano, así se detecta lo que el usuario
+  cambió en los Ajustes del sistema. Si un permiso ya se pidió y no se concedió, se muestra un
+  estado explicativo con enlace a Ajustes en vez de volver a pedirlo.
+
+La lógica de pasos y posposiciones es pura y vive en [`src/permissions/model.ts`](src/permissions/model.ts);
+el estado compartido, en [`usePermissionFlow.ts`](src/permissions/usePermissionFlow.ts); el acceso a
+módulos nativos, en [`src/permissions/service.ts`](src/permissions/service.ts).
 
 ## Calidad
 
@@ -131,9 +143,11 @@ dibujar ninguna pantalla, y Expo Router no cargue `_layout.tsx`. Las rutas viven
 | `/` | `src/app/index.tsx` | Lista de tareas |
 | `/tasks/:id` | `src/app/tasks/[id]/index.tsx` | Detalle: lugar, rubro y horario |
 | `/tasks/:id/place` | `src/app/tasks/[id]/place.tsx` | Lugar de la tarea |
-| `/settings` | `src/app/settings.tsx` | Ajustes de avisos (enfriamiento) |
+| `/settings` | `src/app/settings.tsx` | Ajustes de avisos (permisos y enfriamiento) |
+| `/permissions` | `src/app/permissions.tsx` | Modal de permisos (protegido) |
 
-El layout raíz aplica las migraciones y muestra el onboarding de permisos antes del stack.
+El layout raíz aplica las migraciones y muestra el stack; `/permissions` es un modal protegido que
+solo existe mientras hay un pedido de permisos abierto (ver «Permisos»).
 
 ## Lugar específico de una tarea (US-3.1)
 
@@ -164,9 +178,15 @@ Las geocercas nativas se registran con `expo-location` (`startGeofencingAsync`, 
 `GeofencingClient` en Android y region monitoring en iOS) y `expo-task-manager`:
 
 - **Registro** ([`src/geofencing/GeofenceSync.tsx`](src/geofencing/GeofenceSync.tsx) +
-  [`service.ts`](src/geofencing/service.ts)): con la app abierta, cada cambio en tareas pendientes o
-  triggers, y cada vuelta a primer plano, alinea las regiones del sistema con los triggers armados
-  (activos y de tareas `pending`). Si no cambió nada no vuelve a registrar, porque cada registro
+  [`service.ts`](src/geofencing/service.ts)): con la app abierta, alinea las regiones del sistema
+  con los triggers armados (activos y de tareas `pending`) cada vez que la app vuelve a primer plano
+  o cambia algo que puede mover una región: tareas pendientes y su rubro, lugar y radio de cada
+  trigger, zonas del caché de POIs (`geofenceWatchKey`, US-2.2). Títulos, horarios, posposiciones y
+  el `lastState` de cada geocerca no cuentan, así que no piden posición ni re-registran. Espera
+  1,5 s desde el último cambio, para que una ráfaga dé una sola sincronización.
+  Las sincronizaciones van de a una (`syncQueue`), vengan de la interfaz, de la centinela o de un
+  botón de un aviso, y ninguna lee las regiones o la última posición mientras otra las cambia.
+  Si no cambió nada no vuelve a registrar, porque cada registro
   hace que Android repita el estado actual de todas las regiones. Sin permiso de ubicación en
   segundo plano se detiene. Límite: 20 regiones en iOS y 100 en Android; si hay más, se priorizan
   las más cercanas. Los triggers `dwell` todavía no se registran.
@@ -176,6 +196,15 @@ Las geocercas nativas se registran con `expo-location` (`startGeofencingAsync`, 
   delega en [`handleEvent.ts`](src/geofencing/handleEvent.ts): guarda `lastState` /
   `lastTransitionAt` del trigger y, al **entrar** a la región de un trigger de entrada, muestra una
   notificación local (ver «Avisos») y la registra en `notification_logs`.
+- **De a un evento por vez** ([`src/background/serial.ts`](src/background/serial.ts), US-2.1):
+  Android ejecuta la tarea una vez por geocerca disparada, en paralelo. Los eventos y los botones
+  de los avisos pasan por `eventQueue`: si se entra a la vez a dos farmacias vecinas, la segunda ve
+  el aviso que registró la primera y no repite las mismas tareas. La centinela replanifica en otra
+  cola (`syncQueue`), para que un evento no se espere a sí mismo.
+- **Historial acotado** (US-2.3): al arrancar, cuando la interfaz queda libre
+  (`requestIdleCallback`), se borran los avisos de más de 30 días
+  (`purgeOldNotificationLogs`). Los enfriamientos usan como mucho las últimas 24 h, así que no se
+  ven afectados.
 - **Sin avisos repetidos** ([`model.ts`](src/geofencing/model.ts)): no se avisa si el trigger ya
   estaba `inside` (el registro repite el estado actual), si la tarea no está pendiente o está
   pospuesta, ni dentro del enfriamiento del lugar (ver «Avisos»).

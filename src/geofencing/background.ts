@@ -2,6 +2,7 @@ import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
 import * as TaskManager from 'expo-task-manager';
 
+import { eventQueue } from '../background/serial';
 import { db } from '../db/client';
 import { ensureMigrated } from '../db/migrate';
 import { createRepositories } from '../db/repositories';
@@ -50,17 +51,23 @@ TaskManager.defineTask<GeofencingTaskData>(GEOFENCE_TASK_NAME, async ({ data, er
     // podría estar atrasado; migra una sola vez por runtime.
     await ensureMigrated();
     const repos = createRepositories(db);
-    const outcome = await handleGeofenceEvent(
-      {
-        repos,
-        notify: showGeofenceNotification,
-        // Al salir de la centinela: nuevas geocercas de rubro alrededor de la posición actual.
-        replan: () => syncGeofences(repos),
-        currentFix: readRecentFix,
-        now: new Date(),
-      },
-      event,
-      data.region.identifier,
+    // Android ejecuta la tarea una vez por geocerca disparada, en paralelo: dos
+    // locales vecinos leerían el historial antes de que el otro avise y saldrían
+    // dos avisos de las mismas tareas. En la cola, el segundo ve el enfriamiento
+    // que dejó el primero (US-2.1). `now` se toma al empezar el turno.
+    const outcome = await eventQueue(() =>
+      handleGeofenceEvent(
+        {
+          repos,
+          notify: showGeofenceNotification,
+          // Al salir de la centinela: nuevas geocercas de rubro alrededor de la posición actual.
+          replan: () => syncGeofences(repos),
+          currentFix: readRecentFix,
+          now: new Date(),
+        },
+        event,
+        data.region.identifier,
+      ),
     );
     if (__DEV__) console.log('[geofence]', event, data.region.identifier, outcome);
   } catch (e) {

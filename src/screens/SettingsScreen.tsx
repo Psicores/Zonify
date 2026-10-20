@@ -3,20 +3,47 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { db } from '../db/client';
 import { createRepositories } from '../db/repositories';
+import { isBatteryRestricted, type PermissionSnapshot } from '../permissions/model';
+import { usePermissions } from '../permissions/PermissionsProvider';
 import { getPoiCooldownHours, POI_COOLDOWN_OPTIONS, setPoiCooldownHours } from '../settings/appSettings';
 
 const ACCENT = '#0f766e';
 
 /**
- * Ajustes de los avisos (US-6.2).
+ * Resume si los avisos con la app cerrada pueden funcionar.
  *
- * @pre Las migraciones están aplicadas.
- * @post Muestra el enfriamiento por local guardado y permite cambiarlo entre
- *       `POI_COOLDOWN_OPTIONS`; cada toque lo guarda en el momento. Si falla,
- *       muestra el error y conserva el valor anterior.
+ * @pre Ninguna.
+ * @post Devuelve el texto del estado y si falta algún permiso imprescindible
+ *       (ubicación todo el tiempo y precisa, notificaciones); la batería
+ *       restringida solo agrega una advertencia.
+ */
+function alertsStatus(snapshot: PermissionSnapshot): { text: string; missing: boolean } {
+  if (snapshot.foreground !== 'granted' || snapshot.background !== 'granted' || !snapshot.precise) {
+    return { text: 'Desactivados: falta la ubicación todo el tiempo y precisa.', missing: true };
+  }
+  if (snapshot.notifications !== 'granted') {
+    return { text: 'Desactivados: faltan las notificaciones.', missing: true };
+  }
+  if (isBatteryRestricted(snapshot.battery)) {
+    return { text: 'Activados, pero la batería puede demorarlos o pausarlos.', missing: true };
+  }
+  return { text: 'Activados.', missing: false };
+}
+
+/**
+ * Ajustes de los avisos (US-6.2) y sus permisos (US-3.1).
+ *
+ * @pre Las migraciones están aplicadas y la pantalla está dentro de `PermissionsProvider`.
+ * @post Muestra si los avisos con la app cerrada pueden funcionar y, si falta
+ *       algo, «Activar avisos», que abre el pedido de permisos aunque el usuario
+ *       lo haya pospuesto. Muestra el enfriamiento por local guardado y permite
+ *       cambiarlo entre `POI_COOLDOWN_OPTIONS`; cada toque lo guarda en el
+ *       momento. Si falla, muestra el error y conserva el valor anterior.
  */
 export function SettingsScreen() {
   const repos = useMemo(() => createRepositories(db), []);
+  const { snapshot, askFor: askForPermissions } = usePermissions();
+  const alerts = snapshot && alertsStatus(snapshot);
   const [cooldown, setCooldown] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -52,6 +79,24 @@ export function SettingsScreen() {
 
   return (
     <ScrollView contentContainerStyle={styles.content}>
+      {alerts && (
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle} accessibilityRole="header">
+            Avisos con la app cerrada
+          </Text>
+          <Text style={styles.muted}>{alerts.text}</Text>
+          {alerts.missing && (
+            <Pressable
+              style={({ pressed }) => [styles.button, pressed && styles.pressed]}
+              onPress={() => askForPermissions('alerts', { force: true })}
+              accessibilityRole="button"
+            >
+              <Text style={styles.buttonText}>Activar avisos</Text>
+            </Pressable>
+          )}
+        </View>
+      )}
+
       <View style={styles.section}>
         <Text style={styles.sectionTitle} accessibilityRole="header">
           Después de avisar en un local
@@ -116,5 +161,14 @@ const styles = StyleSheet.create({
   optionSelected: { backgroundColor: ACCENT, borderColor: ACCENT },
   optionText: { color: '#334155', fontWeight: '700' },
   optionTextSelected: { color: '#fff' },
+  button: {
+    minHeight: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: 10,
+    backgroundColor: ACCENT,
+  },
+  buttonText: { color: '#fff', fontWeight: '700' },
+  pressed: { opacity: 0.8 },
   error: { color: '#b91c1c' },
 });

@@ -2,6 +2,7 @@ import * as Notifications from 'expo-notifications';
 import { useRouter } from 'expo-router';
 import { useEffect, useMemo, useRef } from 'react';
 
+import { eventQueue } from '../background/serial';
 import { db } from '../db/client';
 import { createRepositories } from '../db/repositories';
 import { syncGeofences } from '../geofencing/service';
@@ -45,16 +46,19 @@ export function NotificationResponses() {
       Notifications.clearLastNotificationResponse();
       return;
     }
-    handleAlertAction(
-      {
-        repos,
-        resync: () => syncGeofences(repos),
-        dismiss: Notifications.dismissNotificationAsync,
-        now: new Date(),
-      },
-      response.actionIdentifier,
-      content.data,
-      identifier,
+    // Misma cola que los eventos de geocercas y que los botones con la app cerrada (US-2.1).
+    eventQueue(() =>
+      handleAlertAction(
+        {
+          repos,
+          resync: () => syncGeofences(repos),
+          dismiss: Notifications.dismissNotificationAsync,
+          now: new Date(),
+        },
+        response.actionIdentifier,
+        content.data,
+        identifier,
+      ),
     )
       .then((outcome) => {
         if (__DEV__) console.log('[avisos] acción', response.actionIdentifier, outcome);

@@ -16,6 +16,7 @@ import { CategoryChips } from '../components/CategoryChips';
 import { SwipeableRow, type SwipeAction } from '../components/SwipeableRow';
 import { db } from '../db/client';
 import { createRepositories } from '../db/repositories';
+import { usePermissions } from '../permissions/PermissionsProvider';
 import { circleBounds, type Coordinates } from '../places/geo';
 import type { Task } from '../db/schema';
 import {
@@ -80,6 +81,7 @@ export function TasksScreen() {
   const { position, status: positionStatus, refresh: refreshPosition } = useCurrentPosition();
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const { askFor: askForPermissions } = usePermissions();
 
   const [tab, setTab] = useState<TaskTab>('active');
   const [text, setText] = useState('');
@@ -143,13 +145,15 @@ export function TasksScreen() {
    * @post Si hay título y no había otro guardado en curso, la tarea queda creada
    *       con el rubro elegido (si hay), `text` vacío, el rubro sin elegir,
    *       `error` en `null` y la pestaña en «Activas»; si falla, `error` tiene el
-   *       mensaje y ni `text` ni el rubro cambian. Sin título no hace nada.
+   *       mensaje y ni `text` ni el rubro cambian. Sin título no hace nada. Una
+   *       tarea con rubro abre el pedido de permisos de avisos (US-3.1).
    */
   const save = useCallback(async () => {
     if (!title || saving.current) return;
     saving.current = true;
     try {
       await repos.tasks.create({ title, categoryId });
+      if (categoryId !== null) askForPermissions('alerts');
       setText('');
       setCategoryId(null);
       setError(null);
@@ -159,7 +163,7 @@ export function TasksScreen() {
     } finally {
       saving.current = false;
     }
-  }, [repos, title, categoryId]);
+  }, [repos, title, categoryId, askForPermissions]);
 
   /**
    * Aplica una acción de deslizamiento a una tarea.

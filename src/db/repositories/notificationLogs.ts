@@ -1,4 +1,4 @@
-import { and, desc, eq, ne } from 'drizzle-orm';
+import { and, desc, eq, lt, ne } from 'drizzle-orm';
 
 import {
   notificationLogs,
@@ -113,6 +113,25 @@ export function createNotificationLogRepository(db: AppDatabase) {
         .orderBy(desc(notificationLogs.firedAt))
         .limit(1);
       return row?.firedAt ?? null;
+    },
+
+    /**
+     * Borra el historial viejo (US-2.3).
+     *
+     * @pre `days` > 0. Tiene que superar el enfriamiento más largo (24 h):
+     *      los enfriamientos se calculan con este historial.
+     * @post No quedan filas con `firedAt` anterior a `now - days` días; las
+     *       demás no cambian. Devuelve cuántas borró. Usa el índice de `fired_at`.
+     * @throws `RangeError` si `days` no es un número positivo, sin borrar nada.
+     */
+    async purgeOldNotificationLogs(days = 30, now: Date = new Date()): Promise<number> {
+      if (!Number.isFinite(days) || days <= 0) throw new RangeError('Los días a conservar tienen que ser positivos');
+      const before = new Date(now.getTime() - days * 24 * 60 * 60_000);
+      const rows = await db
+        .delete(notificationLogs)
+        .where(lt(notificationLogs.firedAt, before))
+        .returning({ id: notificationLogs.id });
+      return rows.length;
     },
 
     /**

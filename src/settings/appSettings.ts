@@ -1,4 +1,5 @@
 import type { Repositories } from '../db/repositories';
+import type { PermissionGroup, PermissionSkips } from '../permissions/model';
 import type { Coordinates } from '../places/geo';
 
 /** Opciones de enfriamiento por local que ofrece la pantalla de ajustes, en horas. */
@@ -10,6 +11,8 @@ export const SNOOZE_MS = 2 * 60 * 60_000;
 
 const POI_COOLDOWN_KEY = 'notifications.poiCooldownHours';
 const LAST_FIX_KEY = 'motion.lastPlanningFix';
+const PERMISSION_SKIPS_KEY = 'permissions.skippedUntil';
+const PERMISSION_GROUPS: readonly PermissionGroup[] = ['location', 'notifications', 'battery'];
 
 /** Posición con la que se planificaron las geocercas por última vez. */
 export interface PlanningFix extends Coordinates {
@@ -68,4 +71,36 @@ export async function getLastPlanningFix(repos: Repositories): Promise<PlanningF
  */
 export async function setLastPlanningFix(repos: Repositories, fix: PlanningFix): Promise<void> {
   await repos.settings.set(LAST_FIX_KEY, JSON.stringify(fix));
+}
+
+/**
+ * Lee hasta cuándo está pospuesto cada grupo de permisos (US-3.1).
+ *
+ * @pre Las migraciones están aplicadas.
+ * @post Devuelve los grupos conocidos con un plazo numérico; ignora el resto.
+ *       Si no hay nada guardado o está mal formado, devuelve `{}`.
+ */
+export async function getPermissionSkips(repos: Repositories): Promise<PermissionSkips> {
+  try {
+    const raw = await repos.settings.get(PERMISSION_SKIPS_KEY);
+    const parsed = raw ? (JSON.parse(raw) as Record<string, unknown>) : {};
+    const skips: PermissionSkips = {};
+    for (const group of PERMISSION_GROUPS) {
+      const until = parsed[group];
+      if (typeof until === 'number' && Number.isFinite(until)) skips[group] = until;
+    }
+    return skips;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Guarda hasta cuándo está pospuesto cada grupo de permisos.
+ *
+ * @pre Ninguna.
+ * @post `getPermissionSkips` devuelve `skips`.
+ */
+export async function setPermissionSkips(repos: Repositories, skips: PermissionSkips): Promise<void> {
+  await repos.settings.set(PERMISSION_SKIPS_KEY, JSON.stringify(skips));
 }

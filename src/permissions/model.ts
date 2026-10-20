@@ -30,11 +30,25 @@ export interface PermissionSnapshot {
 
 export type PermissionGroup = 'location' | 'notifications' | 'battery';
 
-/** Lo que el usuario ya hizo en esta sesión y no se puede deducir del sistema. */
+/**
+ * Para qué se piden permisos en este momento (US-3.1):
+ * - `location`: el mapa, que solo necesita la ubicación mientras se usa la app.
+ * - `alerts`: avisar con la app cerrada (ubicación todo el tiempo y precisa,
+ *   notificaciones y, en Android, batería sin restricciones).
+ */
+export type PermissionDemand = 'location' | 'alerts';
+
+/** Tiempo durante el que «Ahora no» deja de pedir un grupo de permisos (US-3.1). */
+export const PERMISSION_SKIP_GRACE_MS = 7 * 24 * 60 * 60_000;
+
+/** Hasta cuándo está pospuesto cada grupo, en ms desde epoch. Se guarda en `app_settings`. */
+export type PermissionSkips = Partial<Record<PermissionGroup, number>>;
+
+/** Lo que el usuario ya hizo y no se puede deducir del sistema. */
 export interface FlowProgress {
   backgroundRequested: boolean;
   notificationsRequested: boolean;
-  /** Grupos que el usuario decidió posponer. */
+  /** Grupos pospuestos con «Ahora no» y todavía dentro del plazo de gracia. */
   skipped: readonly PermissionGroup[];
 }
 
@@ -103,37 +117,91 @@ export function isBatteryRestricted(battery: BatteryStatus): boolean {
 }
 
 /**
- * Decide qué paso del onboarding mostrar. El orden es ubicación en primer plano,
- * ubicación precisa, ubicación en background, notificaciones y batería.
+ * Grupos de permisos que hacen falta para un pedido.
+ *
+ * @pre Ninguna.
+ * @post `location` → solo ubicación; `alerts` → ubicación, notificaciones y batería.
+ */
+export function groupsFor(demand: PermissionDemand): PermissionGroup[] {
+  return demand === 'location' ? ['location'] : ['location', 'notifications', 'battery'];
+}
+
+/**
+ * Grupos que siguen pospuestos.
+ *
+ * @pre Ninguna.
+ * @post Devuelve los grupos de `skips` cuyo plazo termina después de `now`.
+ */
+export function activeSkips(skips: PermissionSkips, now: number): PermissionGroup[] {
+  return (Object.keys(skips) as PermissionGroup[]).filter((group) => (skips[group] ?? 0) > now);
+}
+
+/**
+ * Pospone un grupo («Ahora no»).
+ *
+ * @pre Ninguna.
+ * @post Devuelve `skips` con `group` pospuesto hasta `now + PERMISSION_SKIP_GRACE_MS`;
+ *       los demás grupos no cambian.
+ */
+export function skipGroup(skips: PermissionSkips, group: PermissionGroup, now: number): PermissionSkips {
+  return { ...skips, [group]: now + PERMISSION_SKIP_GRACE_MS };
+}
+
+/**
+ * Quita la posposición de algunos grupos (el usuario pidió activar algo).
+ *
+ * @pre Ninguna.
+ * @post Devuelve `skips` sin los grupos de `groups`.
+ */
+export function clearSkips(skips: PermissionSkips, groups: readonly PermissionGroup[]): PermissionSkips {
+  return Object.fromEntries(
+    Object.entries(skips).filter(([group]) => !groups.includes(group as PermissionGroup)),
+  ) as PermissionSkips;
+}
+
+/**
+ * Primer permiso que le falta a un pedido, sin mirar las posposiciones. El orden
+ * es ubicación en primer plano, precisa, en background, notificaciones y batería.
  *
  * @pre `snapshot` refleja el estado actual del sistema.
- * @post Devuelve el primer paso pendiente de un grupo no pospuesto, o `'done'`
- *       si no queda ninguno. Un permiso ya pedido en la sesión y no concedido
- *       lleva a su estado explicativo en lugar de volver a pedirlo.
+ * @post Para `location` solo mira la ubicación en primer plano. Un permiso ya
+ *       pedido y no concedido lleva a su estado explicativo en lugar de volver
+ *       a pedirlo. `'done'` si no falta nada.
  */
-export function resolveStep(snapshot: PermissionSnapshot, progress: FlowProgress): OnboardingStep {
-  if (!progress.skipped.includes('location')) {
-    if (snapshot.foreground === 'blocked') return 'foreground-blocked';
-    if (snapshot.foreground !== 'granted') return 'intro';
-    if (!snapshot.precise) return 'precise-required';
-    if (snapshot.background !== 'granted') {
-      return progress.backgroundRequested || snapshot.background === 'blocked'
-        ? 'background-denied'
-        : 'background';
-    }
+function missingStep(snapshot: PermissionSnapshot, progress: FlowProgress, demand: PermissionDemand): OnboardingStep {
+  if (snapshot.foreground === 'blocked') return 'foreground-blocked';
+  if (snapshot.foreground !== 'granted') return 'intro';
+  if (demand === 'location') return 'done';
+  if (!snapshot.precise) return 'precise-required';
+  if (snapshot.background !== 'granted') {
+    return progress.backgroundRequested || snapshot.background === 'blocked' ? 'background-denied' : 'background';
   }
-
-  if (!progress.skipped.includes('notifications') && snapshot.notifications !== 'granted') {
+  if (snapshot.notifications !== 'granted') {
     return progress.notificationsRequested || snapshot.notifications === 'blocked'
       ? 'notifications-denied'
       : 'notifications';
   }
-
-  if (!progress.skipped.includes('battery') && isBatteryRestricted(snapshot.battery)) {
-    return 'battery';
-  }
-
+  if (isBatteryRestricted(snapshot.battery)) return 'battery';
   return 'done';
+}
+
+/**
+ * Decide qué paso de permisos mostrar para un pedido (US-3.1).
+ *
+ * @pre `snapshot` refleja el estado actual del sistema.
+ * @post Sin pedido devuelve `'done'`. Si no, el primer permiso que le falta
+ *       (`missingStep`); si su grupo está pospuesto devuelve `'done'`: sin ese
+ *       permiso los siguientes no sirven (sin ubicación todo el tiempo no hay
+ *       avisos que mostrar), así que tampoco se piden.
+ */
+export function resolveStep(
+  snapshot: PermissionSnapshot,
+  progress: FlowProgress,
+  demand: PermissionDemand | null,
+): OnboardingStep {
+  if (demand === null) return 'done';
+  const step = missingStep(snapshot, progress, demand);
+  return step !== 'done' && progress.skipped.includes(groupOf(step)) ? 'done' : step;
 }
 
 /**

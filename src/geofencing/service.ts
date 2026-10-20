@@ -3,6 +3,7 @@ import * as Notifications from 'expo-notifications';
 import * as TaskManager from 'expo-task-manager';
 import { Platform } from 'react-native';
 
+import { syncQueue } from '../background/serial';
 import type { Repositories } from '../db/repositories';
 import { ALERT_CATEGORY_ID, ensureNotificationSetup } from '../notifications/setup';
 import {
@@ -98,7 +99,7 @@ async function readPlanningPosition(): Promise<MotionFix | null> {
  * @throws Error de expo-location si el sistema rechaza el registro (p. ej. sin
  *         ubicación precisa en Android).
  */
-export async function syncGeofences(repos: Repositories): Promise<GeofenceSyncResult> {
+async function syncGeofencesNow(repos: Repositories): Promise<GeofenceSyncResult> {
   if (!(await TaskManager.isAvailableAsync())) return { status: 'unavailable', count: 0 };
 
   const started = await Location.hasStartedGeofencingAsync(GEOFENCE_TASK_NAME);
@@ -146,6 +147,21 @@ export async function syncGeofences(repos: Repositories): Promise<GeofenceSyncRe
   }
   await Location.startGeofencingAsync(GEOFENCE_TASK_NAME, regions);
   return { status: 'registered', count: regions.length, motion };
+}
+
+/**
+ * Alinea las geocercas del sistema operativo, de a una sincronización por vez
+ * (US-2.1).
+ *
+ * @pre Igual que `syncGeofencesNow`.
+ * @post Igual que `syncGeofencesNow`, pero espera a que terminen las
+ *       sincronizaciones pedidas antes (desde la interfaz, al salir de la
+ *       centinela o tras un botón de un aviso): ninguna lee las regiones
+ *       registradas ni la última posición mientras otra las está cambiando.
+ * @throws Igual que `syncGeofencesNow`.
+ */
+export function syncGeofences(repos: Repositories): Promise<GeofenceSyncResult> {
+  return syncQueue(() => syncGeofencesNow(repos));
 }
 
 /**

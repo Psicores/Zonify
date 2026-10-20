@@ -28,6 +28,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { db } from '../db/client';
 import { createRepositories } from '../db/repositories';
+import { usePermissions } from '../permissions/PermissionsProvider';
 import {
   bearingDegrees,
   circleBounds,
@@ -82,19 +83,26 @@ function frameCircle(camera: CameraRef | null, center: Coordinates, radius: numb
  * mapa; el radio de la geocerca se elige con presets o arrastrando el punto del
  * borde del círculo.
  *
- * @pre La tarea `taskId` existe y la pantalla está dentro del stack de Expo Router.
- * @post Al guardar, la tarea queda anclada a un `LocationTarget` nuevo con el
- *       nombre, la dirección, las coordenadas y el radio elegidos (reemplazando
- *       el lugar anterior) y se vuelve a la pantalla previa. «Quitar lugar»
- *       desancla la tarea. Si una escritura falla, se muestra el error y no se
- *       sale de la pantalla.
+ * @pre La tarea `taskId` existe y la pantalla está dentro del stack de Expo
+ *      Router y de `PermissionsProvider`.
+ * @post Al abrirse pide la ubicación en primer plano si falta y no está
+ *       pospuesta (US-3.1), y espera la respuesta antes de mostrar el mapa,
+ *       para abrirlo donde está el usuario; sin ubicación ofrece activarla
+ *       («Activar ubicación» ignora «Ahora no»). Al guardar, la tarea queda
+ *       anclada a un `LocationTarget` nuevo con el nombre, la dirección, las
+ *       coordenadas y el radio elegidos (reemplazando el lugar anterior), se
+ *       abre el pedido de permisos de avisos y se vuelve a la pantalla previa.
+ *       «Quitar lugar» desancla la tarea. Si una escritura falla, se muestra el
+ *       error y no se sale de la pantalla.
  */
 export function PlacePickerScreen({ taskId }: { taskId: number }) {
   const repos = useMemo(() => createRepositories(db), []);
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const cameraRef = useRef<CameraRef>(null);
-  const { position, status: positionStatus } = useCurrentPosition();
+  const { position, status: positionStatus, refresh: refreshPosition } = useCurrentPosition();
+  const { snapshot, prompting, askFor: askForPermissions } = usePermissions();
+  const foregroundGranted = snapshot?.foreground === 'granted';
 
   const [initial, setInitial] = useState<InitialData | null>(null);
   const [selection, setSelection] = useState<PlaceCandidate | null>(null);
@@ -139,6 +147,18 @@ export function PlacePickerScreen({ taskId }: { taskId: number }) {
       cancelled = true;
     };
   }, [repos, taskId]);
+
+  // Se vuelve a intentar cuando se leen los permisos (cambia `askForPermissions`);
+  // si el usuario ya respondió o pospuso, no abre nada.
+  useEffect(() => {
+    askForPermissions('location');
+  }, [askForPermissions]);
+
+  // La posición se leyó antes de que el usuario diera el permiso.
+  const positionStale = foregroundGranted && positionStatus === 'denied';
+  useEffect(() => {
+    if (positionStale) void refreshPosition();
+  }, [positionStale, refreshPosition]);
 
   /**
    * Elige un lugar y lo encuadra.
@@ -227,6 +247,7 @@ export function PlacePickerScreen({ taskId }: { taskId: number }) {
         longitude: selection.longitude,
         radiusMeters: radius,
       });
+      askForPermissions('alerts');
       router.back();
     } catch (e) {
       setError(`No se pudo guardar el lugar: ${e instanceof Error ? e.message : String(e)}`);
@@ -249,8 +270,9 @@ export function PlacePickerScreen({ taskId }: { taskId: number }) {
   };
 
   // El mapa se monta cuando se sabe dónde abrirlo: el lugar guardado, la
-  // posición del usuario o, si no hay ninguno, el mundo entero.
-  if (!initial || (!initial.place && positionStatus === 'loading')) {
+  // posición del usuario (cuando respondió el pedido de ubicación) o, si no hay
+  // ninguno, el mundo entero.
+  if (!initial || (!initial.place && (positionStatus === 'loading' || !snapshot || prompting || positionStale))) {
     return (
       <View style={styles.center}>
         <ActivityIndicator />
@@ -378,6 +400,15 @@ export function PlacePickerScreen({ taskId }: { taskId: number }) {
           </View>
         </View>
         {selection && <Text style={styles.hint}>Arrastra el punto del borde del círculo para ajustar el radio.</Text>}
+        {positionStatus === 'denied' && !foregroundGranted && (
+          <Pressable
+            onPress={() => askForPermissions('location', { force: true })}
+            accessibilityRole="button"
+            hitSlop={8}
+          >
+            <Text style={styles.link}>Activar ubicación para ver dónde estás</Text>
+          </Pressable>
+        )}
         {error && <Text style={styles.error}>{error}</Text>}
 
         <View style={styles.actions}>
@@ -479,6 +510,7 @@ const styles = StyleSheet.create({
   presetText: { color: '#334155', fontWeight: '600' },
   presetTextSelected: { color: '#fff' },
   hint: { color: '#94a3b8', fontSize: 12 },
+  link: { color: ACCENT, fontWeight: '600' },
   error: { color: '#b91c1c' },
   actions: { flexDirection: 'row', gap: 8 },
   primary: {
