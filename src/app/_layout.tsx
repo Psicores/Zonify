@@ -1,19 +1,13 @@
-// Primero: define las tareas de fondo al cargar el bundle, también cuando el
-// sistema despierta la app cerrada (geocercas, botones de avisos y caché de POIs).
-import '../geofencing/background';
-import '../notifications/background';
-import '../pois/background';
-
-import { useMigrations } from 'drizzle-orm/expo-sqlite/migrator';
+// Las tareas de fondo se definen en `index.ts`, antes de cargar Expo Router.
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-import migrations from '../../drizzle/migrations';
 import { seedCatalog } from '../categories/seed';
 import { db } from '../db/client';
+import { ensureMigrated } from '../db/migrate';
 import { createRepositories } from '../db/repositories';
 import { GeofenceSync } from '../geofencing/GeofenceSync';
 import { NotificationResponses } from '../notifications/NotificationResponses';
@@ -25,7 +19,8 @@ import { PermissionGate } from '../screens/PermissionsOnboardingScreen';
  * mostrar la navegación.
  *
  * @pre `db` apunta a la base del dispositivo y `drizzle/migrations` está generado.
- * @post Mientras migra muestra un indicador de carga; si falla, muestra el error
+ * @post Mientras migra (con `ensureMigrated`, la misma migración que usan las
+ *       tareas de fondo) muestra un indicador de carga; si falla, muestra el error
  *       y no renderiza nada que use la base; si termina bien, el esquema está al
  *       día, los rubros del catálogo están guardados y se muestra el onboarding
  *       de permisos pendientes o, si no queda ninguno, el stack de pantallas
@@ -33,7 +28,17 @@ import { PermissionGate } from '../screens/PermissionsOnboardingScreen';
  *       atención de los toques en los avisos.
  */
 export default function RootLayout() {
-  const { success, error } = useMigrations(db, migrations);
+  const [{ success, error }, setMigration] = useState<{ success: boolean; error: Error | null }>({
+    success: false,
+    error: null,
+  });
+
+  useEffect(() => {
+    ensureMigrated().then(
+      () => setMigration({ success: true, error: null }),
+      (e: unknown) => setMigration({ success: false, error: e instanceof Error ? e : new Error(String(e)) }),
+    );
+  }, []);
 
   useEffect(() => {
     if (!success) return;

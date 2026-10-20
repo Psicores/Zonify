@@ -1,9 +1,8 @@
 import * as BackgroundTask from 'expo-background-task';
-import { migrate } from 'drizzle-orm/expo-sqlite/migrator';
 import * as TaskManager from 'expo-task-manager';
 
-import migrations from '../../drizzle/migrations';
 import { db } from '../db/client';
+import { ensureMigrated } from '../db/migrate';
 import { createRepositories } from '../db/repositories';
 import { runPoiSync } from './service';
 
@@ -14,7 +13,7 @@ export const POI_SYNC_TASK_NAME = 'zonify-poi-sync';
 // (WorkManager en Android, BGTaskScheduler en iOS), sin montar componentes.
 TaskManager.defineTask(POI_SYNC_TASK_NAME, async () => {
   try {
-    await migrate(db, migrations);
+    await ensureMigrated();
     const outcome = await runPoiSync(createRepositories(db));
     if (__DEV__) console.log('[pois] sync en segundo plano', outcome);
     return BackgroundTask.BackgroundTaskResult.Success;

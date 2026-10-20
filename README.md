@@ -39,8 +39,10 @@ la configuración nativa vive en `app.json`.
 
 - Esquema: [`src/db/schema.ts`](src/db/schema.ts) — `categories`, `location_targets`, `tasks`,
   `geofence_triggers`, `notification_logs`, `pois` y `poi_areas` (caché de locales por rubro).
-- Migraciones: [`drizzle/`](drizzle/) (generadas, no editar a mano). Se aplican al arrancar en
-  el layout raíz [`src/app/_layout.tsx`](src/app/_layout.tsx) con `useMigrations`.
+- Migraciones: [`drizzle/`](drizzle/) (generadas, no editar a mano). Antes de la primera
+  publicación se aplanaron en una sola, `0000_initial_schema`, con el esquema completo. Las aplica
+  `ensureMigrated` ([`src/db/migrate.ts`](src/db/migrate.ts)) una sola vez por runtime de JS: la
+  llaman el layout raíz y cada tarea de fondo, y las llamadas simultáneas comparten la misma promesa.
 - Repositorios: [`src/db/repositories/`](src/db/repositories/), independientes del driver.
 - Conexión: [`src/db/client.ts`](src/db/client.ts) habilita `foreign_keys` y WAL.
 
@@ -118,7 +120,11 @@ Filtros, agrupación y distancias son funciones puras en [`src/tasks/list.ts`](s
 
 ## Navegación
 
-La app usa Expo Router (`main: expo-router/entry`). Las rutas viven en [`src/app/`](src/app/):
+La app usa Expo Router. El punto de entrada es [`index.ts`](index.ts) (`main` en `package.json`):
+primero importa las tareas de fondo ([`src/background/`](src/background/index.ts)) y después
+`expo-router/entry`. Así las tareas quedan definidas aunque el sistema despierte la app cerrada sin
+dibujar ninguna pantalla, y Expo Router no cargue `_layout.tsx`. Las rutas viven en
+[`src/app/`](src/app/):
 
 | Ruta | Archivo | Pantalla |
 | --- | --- | --- |
@@ -165,7 +171,7 @@ Las geocercas nativas se registran con `expo-location` (`startGeofencingAsync`, 
   segundo plano se detiene. Límite: 20 regiones en iOS y 100 en Android; si hay más, se priorizan
   las más cercanas. Los triggers `dwell` todavía no se registran.
 - **Disparo** ([`src/geofencing/background.ts`](src/geofencing/background.ts)): la tarea
-  `zonify-geofences` se define al cargar el bundle (importada primero en `src/app/_layout.tsx`),
+  `zonify-geofences` se define al cargar el bundle (importada desde el punto de entrada `index.ts`),
   así que corre aunque la app esté en segundo plano o cerrada. Aplica migraciones pendientes y
   delega en [`handleEvent.ts`](src/geofencing/handleEvent.ts): guarda `lastState` /
   `lastTransitionAt` del trigger y, al **entrar** a la región de un trigger de entrada, muestra una

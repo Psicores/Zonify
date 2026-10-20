@@ -1,10 +1,9 @@
-import { migrate } from 'drizzle-orm/expo-sqlite/migrator';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
 import * as TaskManager from 'expo-task-manager';
 
-import migrations from '../../drizzle/migrations';
 import { db } from '../db/client';
+import { ensureMigrated } from '../db/migrate';
 import { createRepositories } from '../db/repositories';
 import { handleGeofenceEvent } from './handleEvent';
 import { GEOFENCE_TASK_NAME, type GeofenceEvent } from './model';
@@ -48,8 +47,8 @@ TaskManager.defineTask<GeofencingTaskData>(GEOFENCE_TASK_NAME, async ({ data, er
 
   try {
     // Si la app se actualizó y el evento llega antes de abrirla, el esquema
-    // podría estar atrasado; migrar ya aplicado no hace nada.
-    await migrate(db, migrations);
+    // podría estar atrasado; migra una sola vez por runtime.
+    await ensureMigrated();
     const repos = createRepositories(db);
     const outcome = await handleGeofenceEvent(
       {

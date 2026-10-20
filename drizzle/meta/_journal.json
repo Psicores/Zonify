@@ -5,36 +5,8 @@
     {
       "idx": 0,
       "version": "6",
-      "when": 1792496475586,
-      "tag": "0000_init",
-      "breakpoints": true
-    },
-    {
-      "idx": 1,
-      "version": "6",
-      "when": 1792500722600,
-      "tag": "0001_rubros_y_pois",
-      "breakpoints": true
-    },
-    {
-      "idx": 2,
-      "version": "6",
-      "when": 1792501827763,
-      "tag": "0002_horario_de_avisos",
-      "breakpoints": true
-    },
-    {
-      "idx": 3,
-      "version": "6",
-      "when": 1792502531781,
-      "tag": "0003_avisos_y_ajustes",
-      "breakpoints": true
-    },
-    {
-      "idx": 4,
-      "version": "6",
-      "when": 1792503423256,
-      "tag": "0004_vaciar_datos",
+      "when": 1792506972736,
+      "tag": "0000_initial_schema",
       "breakpoints": true
     }
   ]

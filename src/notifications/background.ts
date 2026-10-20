@@ -1,9 +1,8 @@
-import { migrate } from 'drizzle-orm/expo-sqlite/migrator';
 import * as Notifications from 'expo-notifications';
 import * as TaskManager from 'expo-task-manager';
 
-import migrations from '../../drizzle/migrations';
 import { db } from '../db/client';
+import { ensureMigrated } from '../db/migrate';
 import { createRepositories } from '../db/repositories';
 import { syncGeofences } from '../geofencing/service';
 import { handleAlertAction } from './actions';
@@ -20,7 +19,7 @@ TaskManager.defineTask<Notifications.NotificationTaskPayload>(
     if (error || !data || !('actionIdentifier' in data)) return;
     if (data.actionIdentifier === Notifications.DEFAULT_ACTION_IDENTIFIER) return;
     try {
-      await migrate(db, migrations);
+      await ensureMigrated();
       const repos = createRepositories(db);
       const outcome = await handleAlertAction(
         {

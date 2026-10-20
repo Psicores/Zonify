@@ -1,7 +1,7 @@
 {
   "name": "zonify",
   "version": "1.0.0",
-  "main": "expo-router/entry",
+  "main": "index.ts",
   "dependencies": {
     "@maplibre/maplibre-react-native": "^11.5.0",
     "babel-preset-expo": "~58.0.0",

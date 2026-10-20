@@ -14,6 +14,6 @@ expoDb.execSync('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
 
 /**
  * Instancia única de Drizzle sobre la base del dispositivo.
- * Antes de usarla hay que aplicar las migraciones (lo hace `useMigrations` en `App`).
+ * Antes de usarla hay que aplicar las migraciones con `ensureMigrated` (`./migrate`).
  */
 export const db = drizzle(expoDb, { schema });
