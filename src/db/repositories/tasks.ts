@@ -1,9 +1,40 @@
 import { and, desc, eq, inArray, isNotNull, notExists, type SQL } from 'drizzle-orm';
 
-import { geofenceTriggers, tasks, type NewTask, type Task, type TaskStatus } from '../schema';
+import { categories, geofenceTriggers, tasks, type NewTask, type Task, type TaskStatus } from '../schema';
 import type { AppDatabase } from '../types';
 
 export type TaskUpdate = Partial<Omit<NewTask, 'id' | 'createdAt' | 'updatedAt'>>;
+
+/** Ventana de avisos de una tarea (ver `src/tasks/schedule.ts`). */
+export interface TaskAlertWindow {
+  alertStartMinute: number | null;
+  alertEndMinute: number | null;
+  alertDays: number | null;
+}
+
+const isMinuteOfDay = (value: number) => Number.isInteger(value) && value >= 0 && value <= 1439;
+
+/**
+ * Comprueba que una ventana de avisos sea guardable.
+ *
+ * @pre Ninguna.
+ * @post No hace nada si la ventana es válida.
+ * @throws `RangeError` si solo uno de los extremos de la franja es `null`, si
+ *         algún extremo no es un minuto del día (0–1439) o si `alertDays` no es
+ *         `null` ni un entero entre 1 y 127.
+ */
+export function assertValidAlertWindow(window: TaskAlertWindow): void {
+  const { alertStartMinute: start, alertEndMinute: end, alertDays: days } = window;
+  if ((start === null) !== (end === null)) {
+    throw new RangeError('La franja horaria necesita hora de inicio y de fin');
+  }
+  if (start !== null && end !== null && (!isMinuteOfDay(start) || !isMinuteOfDay(end))) {
+    throw new RangeError('La franja horaria tiene una hora fuera de rango');
+  }
+  if (days !== null && (!Number.isInteger(days) || days < 1 || days > 127)) {
+    throw new RangeError('Hay que elegir al menos un día');
+  }
+}
 
 export interface TaskFilter {
   status?: TaskStatus;
@@ -136,6 +167,19 @@ export function createTaskRepository(db: AppDatabase) {
     },
 
     /**
+     * Cambia la ventana en la que suenan los avisos de una tarea (US-5.2).
+     *
+     * @pre Ninguna.
+     * @post Si la ventana es válida y la tarea existe, la guarda y devuelve la
+     *       fila; si la tarea no existe, devuelve `undefined`.
+     * @throws `RangeError` (ver `assertValidAlertWindow`) sin modificar nada.
+     */
+    setAlertWindow(id: number, window: TaskAlertWindow) {
+      assertValidAlertWindow(window);
+      return this.update(id, window);
+    },
+
+    /**
      * Marca una tarea como completada.
      *
      * @pre Ninguna.
@@ -144,6 +188,47 @@ export function createTaskRepository(db: AppDatabase) {
      */
     complete(id: number, at: Date = new Date()) {
       return this.update(id, { status: 'completed', completedAt: at });
+    },
+
+    /**
+     * Completa varias tareas a la vez (acción «Hecho» de una notificación).
+     *
+     * @pre Ninguna.
+     * @post Las tareas de `ids` que estaban pendientes quedan `'completed'` con
+     *       `completedAt = at`; las demás no cambian (repetir la acción no
+     *       pisa la fecha). Devuelve cuántas cambiaron.
+     */
+    async completeMany(ids: readonly number[], at: Date = new Date()): Promise<number> {
+      if (ids.length === 0) return 0;
+      const rows = await db
+        .update(tasks)
+        .set({ status: 'completed', completedAt: at })
+        .where(and(inArray(tasks.id, [...ids]), eq(tasks.status, 'pending')))
+        .returning({ id: tasks.id });
+      return rows.length;
+    },
+
+    /**
+     * Pospone tareas y silencia sus rubros (acción «Posponer» de una notificación, US-6.2).
+     *
+     * @pre Ninguna.
+     * @post Las tareas de `ids` y los rubros de esas tareas quedan con
+     *       `snoozedUntil = until`, en una transacción. Ids inexistentes se ignoran.
+     */
+    snooze(ids: readonly number[], until: Date): void {
+      if (ids.length === 0) return;
+      db.transaction((tx) => {
+        tx.update(tasks).set({ snoozedUntil: until }).where(inArray(tasks.id, [...ids])).run();
+        const categoryIds = tx
+          .selectDistinct({ id: tasks.categoryId })
+          .from(tasks)
+          .where(and(inArray(tasks.id, [...ids]), isNotNull(tasks.categoryId)))
+          .all()
+          .map((row) => row.id!);
+        if (categoryIds.length > 0) {
+          tx.update(categories).set({ snoozedUntil: until }).where(inArray(categories.id, categoryIds)).run();
+        }
+      });
     },
 
     /**

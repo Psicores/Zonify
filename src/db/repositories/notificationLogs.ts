@@ -99,6 +99,23 @@ export function createNotificationLogRepository(db: AppDatabase) {
     },
 
     /**
+     * Momento del último aviso disparado por un local de rubro.
+     *
+     * @pre Ninguna.
+     * @post Devuelve el `firedAt` más reciente con ese `poiOsmKey` sin contar
+     *       los fallidos, o `null` si no hay ninguno.
+     */
+    async lastFiredAtForPoi(poiOsmKey: string): Promise<Date | null> {
+      const [row] = await db
+        .select({ firedAt: notificationLogs.firedAt })
+        .from(notificationLogs)
+        .where(and(eq(notificationLogs.poiOsmKey, poiOsmKey), ne(notificationLogs.status, 'failed')))
+        .orderBy(desc(notificationLogs.firedAt))
+        .limit(1);
+      return row?.firedAt ?? null;
+    },
+
+    /**
      * Cambia el estado de una notificación.
      *
      * @pre Ninguna.

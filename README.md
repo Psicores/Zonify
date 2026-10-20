@@ -58,7 +58,13 @@ y guarda el último estado conocido de la geocerca (`unknown` / `inside` / `outs
 ```bash
 # 1. Editar src/db/schema.ts
 npm run db:generate -- --name <descripcion>   # 2. genera drizzle/NNNN_<descripcion>.sql
+# 3. Reiniciar Metro (npm start): la versión de caché depende del contenido de los .sql
 ```
+
+No agregar `CHECK` (ni otros cambios que obliguen a reconstruir la tabla) a tablas existentes:
+SQLite no los admite con `ALTER TABLE`, Drizzle recrea la tabla y, como las migraciones corren en
+una transacción, el `PRAGMA foreign_keys=OFF` no tiene efecto y el `DROP TABLE` dispara los
+`ON DELETE CASCADE`. Revisar siempre el `.sql` generado antes de commitear.
 
 ## Permisos (onboarding)
 
@@ -117,13 +123,16 @@ La app usa Expo Router (`main: expo-router/entry`). Las rutas viven en [`src/app
 | Ruta | Archivo | Pantalla |
 | --- | --- | --- |
 | `/` | `src/app/index.tsx` | Lista de tareas |
+| `/tasks/:id` | `src/app/tasks/[id]/index.tsx` | Detalle: lugar, rubro y horario |
 | `/tasks/:id/place` | `src/app/tasks/[id]/place.tsx` | Lugar de la tarea |
+| `/settings` | `src/app/settings.tsx` | Ajustes de avisos (enfriamiento) |
 
 El layout raíz aplica las migraciones y muestra el onboarding de permisos antes del stack.
 
 ## Lugar específico de una tarea (US-3.1)
 
-Tocar una tarea abre el selector de lugar ([`src/screens/PlacePickerScreen.tsx`](src/screens/PlacePickerScreen.tsx)):
+Tocar una tarea abre su detalle y, desde ahí, «Elegir lugar en el mapa» abre el selector
+([`src/screens/PlacePickerScreen.tsx`](src/screens/PlacePickerScreen.tsx)):
 
 - **Mapa**: MapLibre React Native con el estilo vectorial *Liberty* de
   [OpenFreeMap](https://openfreemap.org) (datos de OpenStreetMap, sin clave de API).
@@ -160,12 +169,10 @@ Las geocercas nativas se registran con `expo-location` (`startGeofencingAsync`, 
   así que corre aunque la app esté en segundo plano o cerrada. Aplica migraciones pendientes y
   delega en [`handleEvent.ts`](src/geofencing/handleEvent.ts): guarda `lastState` /
   `lastTransitionAt` del trigger y, al **entrar** a la región de un trigger de entrada, muestra una
-  notificación local por el canal `zone-alerts` y la registra en `notification_logs`.
+  notificación local (ver «Avisos») y la registra en `notification_logs`.
 - **Sin avisos repetidos** ([`model.ts`](src/geofencing/model.ts)): no se avisa si el trigger ya
-  estaba `inside` (el registro repite el estado actual), si la tarea no está pendiente o si hubo
-  otro aviso del mismo trigger en los últimos 10 minutos (saltos del GPS sobre el borde).
-- **Reinicio y actualización**: `expo-task-manager` vuelve a registrar la tarea al reiniciar el
-  teléfono (`BOOT_COMPLETED`) y al actualizar la app.
+  estaba `inside` (el registro repite el estado actual), si la tarea no está pendiente o está
+  pospuesta, ni dentro del enfriamiento del lugar (ver «Avisos»).
 
 ## Rubros (épica 4)
 
@@ -224,8 +231,100 @@ la última hora, normalmente donde se carga el teléfono) y los guarda en `pois`
   alcanza, se reservan al menos 5 lugares para locales y el resto para los lugares propios más
   cercanos.
 - **Aviso**: al entrar al radio de un local se avisan juntas las tareas pendientes de sus rubros
-  («2 tareas cerca — Farmacity: …»), salvo las avisadas en la última hora (pasar por varias
-  farmacias seguidas no repite el aviso).
+  (ver «Avisos» más abajo).
+
+## Avisos (épica 6)
+
+### Notificación enriquecida (US-6.1)
+
+El aviso muestra el lugar arriba y las tareas abajo (`alertContent` en
+[`model.ts`](src/geofencing/model.ts)):
+
+```
+📍 Farmacia del Valle (a 90m)
+Comprar aspirinas y gasas
+```
+
+La distancia sale de la última posición conocida (≤ 2 min) en el momento del evento; si no hay,
+se omite. Varias tareas del rubro se unen («A, B y C»). Suena y vibra por el canal
+`zone-alerts-v2` (importancia alta, sonido por defecto y vibración `[0, 250, 150, 250]`; el canal
+original se creó sin vibración explícita y Android no deja cambiarla, así que se reemplazó).
+Tocar el aviso abre el detalle de su primera tarea, también si la app estaba cerrada
+([`NotificationResponses`](src/notifications/NotificationResponses.tsx)).
+
+### Enfriamiento (US-6.2)
+
+- **Por local o lugar**: después de avisar, el mismo local de rubro (por `osm_key`) o lugar propio
+  no vuelve a avisar durante 12 h. Se configura en Ajustes (⚙️ en la lista): 6, 12 o 24 h
+  (`app_settings`).
+- **Por tarea de rubro**: una tarea no se repite en menos de 1 h aunque pase por otro local del
+  rubro.
+- **Posponer**: el botón «Posponer 2 h» silencia la tarea y todo su rubro durante 2 h
+  (`tasks.snoozed_until` y `categories.snoozed_until`).
+
+### Acciones desde el aviso (US-6.3)
+
+Los avisos tienen los botones **Hecho** (completa las tareas del aviso, re-registra las geocercas
+—así se cancelan las suyas— y lo quita de la bandeja) y **Posponer 2 h**. Ninguno abre la app: en
+Android, con la app en segundo plano o cerrada, los procesa la tarea
+`zonify-notification-actions` (`Notifications.registerTaskAsync`), que despierta solo el JS;
+con la app abierta, `NotificationResponses`. Las acciones son idempotentes. La lógica está en
+[`src/notifications/actions.ts`](src/notifications/actions.ts).
+
+## Batería y robustez (épica 7)
+
+### Detección adaptativa por velocidad (US-7.1)
+
+En lugar de ActivityRecognition / CMMotionActivity (Expo no los trae y requerirían un módulo nativo
+propio y un permiso más), el movimiento se estima con la velocidad de las posiciones que la app ya
+lee al planificar las geocercas: la que informa el sistema o, si no la hay, distancia / tiempo
+desde la posición de la planificación anterior (≤ 15 min). Como la centinela se dispara al
+moverse 500 m, dos salidas seguidas dan una buena estimación.
+
+| Modo | Velocidad | Geocerca de local | Centinela |
+| --- | --- | --- | --- |
+| Quieto | < 0,5 m/s | 100 m | 500 m |
+| A pie | 0,5–7 m/s | 100 m | 500 m |
+| En vehículo | ≥ 7 m/s (~25 km/h) | 250 m (tiempo de reacción) | 1,5 km (menos despertares) |
+
+Desde ~80 km/h no se avisa por locales de rubro (falsos positivos en autopista). Quieto no cambia
+nada porque no hay nada que apagar: la app no consulta el GPS ni corre en segundo plano; solo
+quedan las geocercas del sistema, que son pasivas (celdas y Wi-Fi), y la descarga de POIs, que
+solo corre con Wi-Fi. El criterio de < 1 % en 8 h quieto se mide en el teléfono (Ajustes →
+Batería → uso por app).
+
+### Reinicios y procesos cerrados (US-7.2)
+
+- **Android**: `expo-task-manager` declara un receptor de `BOOT_COMPLETED` y
+  `MY_PACKAGE_REPLACED`. Al arrancar el proceso, `TaskService.restoreTasks()` vuelve a registrar
+  la tarea de geocercas y su consumidor llama de nuevo a `GeofencingClient.addGeofences` con las
+  regiones guardadas; lo mismo pasa con la tarea de POIs (WorkManager persiste solo). Si el
+  sistema mata el proceso, las geocercas siguen en Google Play Services y despiertan la app.
+  Limitación de Android: después de «Forzar detención» desde Ajustes, la app no recibe nada hasta
+  que el usuario la vuelve a abrir.
+- **iOS**: CoreLocation conserva las regiones monitoreadas tras reinicios y cierres, y relanza la
+  app en segundo plano al cruzarlas; `expo-task-manager` restaura las tareas en
+  `didFinishLaunchingWithOptions`. (No probado: el desarrollo es en Linux.)
+
+## Horario de avisos (US-5.2)
+
+En el detalle de la tarea ([`TaskDetailScreen`](src/screens/TaskDetailScreen.tsx)) se elige,
+opcionalmente, una franja «desde/hasta» (HH:MM; puede cruzar la medianoche, p. ej. 22:00–02:00) y
+los días de la semana (con atajos «Lun a Vie» y «Todos los días»). Se guarda por tarea en
+`tasks.alert_start_minute`, `alert_end_minute` y `alert_days` (máscara de bits, lunes = bit 0); la
+lista muestra «🔔 08:30–20:30 · Lun a Vie».
+
+Fuera de la ventana el aviso **llega igual pero sin sonido ni vibración**: en Android por el canal
+`zone-alerts-silent` (importancia baja, sin sonido ni vibración; Android no deja cambiar el sonido
+de un canal existente) y en iOS con `interruptionLevel: 'passive'`. Con la app abierta, los avisos
+silenciosos van solo a la lista de notificaciones, sin banner. Un aviso que agrupa varias tareas
+de un rubro suena si alguna está dentro de su ventana. `notification_logs.silent` registra cómo
+salió cada aviso. La lógica está en [`src/tasks/schedule.ts`](src/tasks/schedule.ts); en una franja
+que cruza la medianoche, la parte de después de las 00:00 cuenta como del día en que empezó.
+
+Los rangos se validan en el repositorio (`setAlertWindow`) y no con `CHECK`: agregar un `CHECK` a
+una tabla existente obliga a Drizzle a reconstruirla, y dentro de la transacción de migración el
+`DROP TABLE` dispararía los `ON DELETE CASCADE`.
 
 **Latencia**: el criterio de aceptación pide < 60 s. Android documenta una latencia típica de
 ~2 minutos para geocercas, mayor con el teléfono quieto o en Doze; `expo-location` usa la

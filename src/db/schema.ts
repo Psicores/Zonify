@@ -53,6 +53,8 @@ export const categories = sqliteTable(
     icon: text('icon'),
     // Rubro del catálogo (src/categories/catalog.ts); null en categorías propias del usuario.
     slug: text('slug'),
+    // Hasta cuándo no avisa ningún local del rubro (al posponer una tarea, US-6.2).
+    snoozedUntil: integer('snoozed_until', { mode: 'timestamp_ms' }),
     ...timestamps,
   },
   (t) => [
@@ -89,6 +91,17 @@ export const tasks = sqliteTable(
     categoryId: integer('category_id').references(() => categories.id, { onDelete: 'set null' }),
     dueAt: integer('due_at', { mode: 'timestamp_ms' }),
     completedAt: integer('completed_at', { mode: 'timestamp_ms' }),
+    // Ventana en la que los avisos suenan (US-5.2); fuera de ella llegan en
+    // silencio. Minutos del día, ambos o ninguno; la franja puede cruzar la
+    // medianoche. Los rangos se validan en el repositorio y no con CHECK: SQLite
+    // no agrega CHECK a una tabla existente y reconstruir `tasks` dentro de la
+    // transacción de migración dispararía los ON DELETE CASCADE.
+    alertStartMinute: integer('alert_start_minute'),
+    alertEndMinute: integer('alert_end_minute'),
+    // Días permitidos: bit 0 = lunes … bit 6 = domingo; null = todos.
+    alertDays: integer('alert_days'),
+    // Pospuesta desde una notificación: no avisa hasta esta fecha (US-6.2).
+    snoozedUntil: integer('snoozed_until', { mode: 'timestamp_ms' }),
     ...timestamps,
   },
   (t) => [
@@ -178,6 +191,14 @@ export const poiAreas = sqliteTable(
   ],
 );
 
+// Ajustes de la app como pares clave/valor (texto JSON), p. ej. el enfriamiento
+// por local o la última posición usada para planificar geocercas.
+export const appSettings = sqliteTable('app_settings', {
+  key: text('key').primaryKey(),
+  value: text('value').notNull(),
+  ...timestamps,
+});
+
 // El historial sobrevive al borrado de la tarea o del trigger (FK set null).
 export const notificationLogs = sqliteTable(
   'notification_logs',
@@ -187,10 +208,15 @@ export const notificationLogs = sqliteTable(
     geofenceTriggerId: integer('geofence_trigger_id').references(() => geofenceTriggers.id, {
       onDelete: 'set null',
     }),
+    // Local de rubro que disparó el aviso (`pois.osm_key`), para su enfriamiento (US-6.2).
+    // Sin FK: el historial sobrevive aunque el local salga del caché.
+    poiOsmKey: text('poi_osm_key'),
     transition: text('transition', { enum: GEOFENCE_TRANSITIONS }).notNull(),
     title: text('title').notNull(),
     body: text('body'),
     status: text('status', { enum: NOTIFICATION_STATUSES }).notNull().default('scheduled'),
+    // `true` si salió sin sonido ni vibración por estar fuera del horario de la tarea.
+    silent: integer('silent', { mode: 'boolean' }).notNull().default(false),
     platformNotificationId: text('platform_notification_id'),
     firedAt: integer('fired_at', { mode: 'timestamp_ms' })
       .notNull()
@@ -251,5 +277,6 @@ export type Poi = typeof pois.$inferSelect;
 export type NewPoi = typeof pois.$inferInsert;
 export type PoiArea = typeof poiAreas.$inferSelect;
 export type NewPoiArea = typeof poiAreas.$inferInsert;
+export type AppSetting = typeof appSettings.$inferSelect;
 export type NotificationLog = typeof notificationLogs.$inferSelect;
 export type NewNotificationLog = typeof notificationLogs.$inferInsert;

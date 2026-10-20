@@ -1,6 +1,7 @@
 // Primero: define las tareas de fondo al cargar el bundle, también cuando el
-// sistema despierta la app cerrada (geocercas y caché de POIs).
+// sistema despierta la app cerrada (geocercas, botones de avisos y caché de POIs).
 import '../geofencing/background';
+import '../notifications/background';
 import '../pois/background';
 
 import { useMigrations } from 'drizzle-orm/expo-sqlite/migrator';
@@ -15,6 +16,7 @@ import { seedCatalog } from '../categories/seed';
 import { db } from '../db/client';
 import { createRepositories } from '../db/repositories';
 import { GeofenceSync } from '../geofencing/GeofenceSync';
+import { NotificationResponses } from '../notifications/NotificationResponses';
 import { PoiSync } from '../pois/PoiSync';
 import { PermissionGate } from '../screens/PermissionsOnboardingScreen';
 
@@ -27,7 +29,8 @@ import { PermissionGate } from '../screens/PermissionsOnboardingScreen';
  *       y no renderiza nada que use la base; si termina bien, el esquema está al
  *       día, los rubros del catálogo están guardados y se muestra el onboarding
  *       de permisos pendientes o, si no queda ninguno, el stack de pantallas
- *       junto con la sincronización de geocercas y del caché de POIs.
+ *       junto con la sincronización de geocercas y del caché de POIs y la
+ *       atención de los toques en los avisos.
  */
 export default function RootLayout() {
   const { success, error } = useMigrations(db, migrations);
@@ -63,9 +66,12 @@ export default function RootLayout() {
       <PermissionGate>
         <GeofenceSync />
         <PoiSync />
+        <NotificationResponses />
         <Stack>
           <Stack.Screen name="index" options={{ headerShown: false }} />
+          <Stack.Screen name="tasks/[id]/index" options={{ title: 'Tarea' }} />
           <Stack.Screen name="tasks/[id]/place" options={{ title: 'Lugar de la tarea' }} />
+          <Stack.Screen name="settings" options={{ title: 'Ajustes' }} />
         </Stack>
       </PermissionGate>
       <StatusBar style="auto" />

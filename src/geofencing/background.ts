@@ -8,7 +8,7 @@ import { db } from '../db/client';
 import { createRepositories } from '../db/repositories';
 import { handleGeofenceEvent } from './handleEvent';
 import { GEOFENCE_TASK_NAME, type GeofenceEvent } from './model';
-import { showGeofenceNotification, syncGeofences } from './service';
+import { readRecentFix, showGeofenceNotification, syncGeofences } from './service';
 
 // Este módulo se evalúa al cargar el bundle, también cuando el sistema despierta
 // la app cerrada por una geocerca: ahí no se monta ningún componente, así que la
@@ -19,14 +19,18 @@ interface GeofencingTaskData {
   region: Location.LocationRegion;
 }
 
-// Con la app abierta las notificaciones no se muestran salvo que un handler lo pida.
+// Con la app abierta las notificaciones no se muestran salvo que un handler lo
+// pida. Las silenciosas (fuera del horario de la tarea) van solo a la lista.
 Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowBanner: true,
-    shouldShowList: true,
-    shouldPlaySound: true,
-    shouldSetBadge: false,
-  }),
+  handleNotification: async (notification) => {
+    const silent = notification.request.content.data?.silent === true;
+    return {
+      shouldShowBanner: !silent,
+      shouldShowList: true,
+      shouldPlaySound: !silent,
+      shouldSetBadge: false,
+    };
+  },
 });
 
 TaskManager.defineTask<GeofencingTaskData>(GEOFENCE_TASK_NAME, async ({ data, error }) => {
@@ -53,6 +57,7 @@ TaskManager.defineTask<GeofencingTaskData>(GEOFENCE_TASK_NAME, async ({ data, er
         notify: showGeofenceNotification,
         // Al salir de la centinela: nuevas geocercas de rubro alrededor de la posición actual.
         replan: () => syncGeofences(repos),
+        currentFix: readRecentFix,
         now: new Date(),
       },
       event,

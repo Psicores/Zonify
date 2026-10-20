@@ -36,6 +36,7 @@ import {
   type TaskTab,
 } from '../tasks/list';
 import { normalizeTaskTitle, TASK_STATUS_LABELS, TASK_TITLE_MAX_LENGTH } from '../tasks/model';
+import { describeSchedule, scheduleOf } from '../tasks/schedule';
 import { useCurrentPosition, type PositionStatus } from '../tasks/useCurrentPosition';
 
 const ACTION_COLORS: Record<TaskAction, string> = {
@@ -70,9 +71,12 @@ export function TasksScreen() {
   const tasksQuery = useMemo(() => repos.tasks.list({ statuses: ['pending', 'completed'] }), [repos]);
   const placesQuery = useMemo(() => repos.geofenceTriggers.listActiveWithLocation(), [repos]);
   const categoriesQuery = useMemo(() => repos.categories.list(), [repos]);
+  // Solo para enterarse de que se descargó una zona del caché de POIs.
+  const poiAreasQuery = useMemo(() => repos.pois.listAreas(), [repos]);
   const { data: tasks } = useLiveQuery(tasksQuery);
   const { data: places } = useLiveQuery(placesQuery);
   const { data: categories } = useLiveQuery(categoriesQuery);
+  const { data: poiAreas } = useLiveQuery(poiAreasQuery);
   const { position, status: positionStatus, refresh: refreshPosition } = useCurrentPosition();
   const insets = useSafeAreaInsets();
   const router = useRouter();
@@ -115,7 +119,7 @@ export function TasksScreen() {
     return () => {
       cancelled = true;
     };
-  }, [repos, position, pendingCategoryKey]);
+  }, [repos, position, pendingCategoryKey, poiAreas]);
 
   const tabItems = useMemo(
     () =>
@@ -218,7 +222,18 @@ export function TasksScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <View style={styles.header}>
-        <Text style={styles.title}>Tareas</Text>
+        <View style={styles.titleRow}>
+          <Text style={styles.title}>Tareas</Text>
+          <Pressable
+            style={({ pressed }) => [styles.settingsButton, pressed && styles.buttonPressed]}
+            onPress={() => router.push('/settings')}
+            accessibilityRole="button"
+            accessibilityLabel="Ajustes de avisos"
+            hitSlop={8}
+          >
+            <Text style={styles.settingsIcon}>⚙️</Text>
+          </Pressable>
+        </View>
         <View style={styles.composer}>
           <TextInput
             style={styles.input}
@@ -288,8 +303,8 @@ export function TasksScreen() {
             left={toSwipeAction(swipe.left, () => applyAction(item.task, swipe.left))}
             onSwipeStart={() => setScrollEnabled(false)}
             onSwipeEnd={() => setScrollEnabled(true)}
-            onPress={() => router.push(`/tasks/${item.task.id}/place`)}
-            pressHint="Abre el mapa para elegir el lugar de la tarea"
+            onPress={() => router.push(`/tasks/${item.task.id}`)}
+            pressHint="Abre la tarea para elegir dónde y cuándo avisa"
           >
             <TaskRow
               item={item}
@@ -306,7 +321,7 @@ export function TasksScreen() {
         ListFooterComponent={
           sections.length > 0 ? (
             <Text style={styles.hint}>
-              Toca una tarea para anclarla a un lugar. Desliza a la derecha para{' '}
+              Toca una tarea para elegir dónde y cuándo avisa. Desliza a la derecha para{' '}
               {TASK_ACTION_LABELS[swipe.right].toLowerCase()} o a la izquierda para{' '}
               {TASK_ACTION_LABELS[swipe.left].toLowerCase()}.
             </Text>
@@ -387,8 +402,8 @@ function anchorDetail(
  * Fila de la lista con el título, el anclaje y el estado de una tarea.
  *
  * @pre `item.task.status` es un valor de `TASK_STATUSES`.
- * @post Muestra el título completo, el detalle de `anchorDetail` si lo hay y la
- *       etiqueta del estado (p. ej. «Activa»).
+ * @post Muestra el título completo, el detalle de `anchorDetail` y la ventana
+ *       de avisos si los hay, y la etiqueta del estado (p. ej. «Activa»).
  */
 function TaskRow({
   item,
@@ -400,12 +415,18 @@ function TaskRow({
   nearestPois: ReadonlyMap<number, NearestPoi> | null;
 }) {
   const detail = anchorDetail(item, position, nearestPois);
+  const schedule = describeSchedule(scheduleOf(item.task));
   const completed = item.task.status === 'completed';
   return (
     <View style={styles.row}>
       <View style={styles.rowBody}>
         <Text style={[styles.rowTitle, completed && styles.rowTitleCompleted]}>{item.task.title}</Text>
         {detail && <Text style={styles.rowDetail}>{detail}</Text>}
+        {schedule && (
+          <Text style={styles.rowDetail} accessibilityLabel={`Suena: ${schedule}`}>
+            🔔 {schedule}
+          </Text>
+        )}
       </View>
       <Text style={[styles.badge, completed && styles.badgeCompleted]}>
         {TASK_STATUS_LABELS[item.task.status]}
@@ -417,7 +438,10 @@ function TaskRow({
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f8fafc' },
   header: { padding: 16, paddingBottom: 8, gap: 12 },
+  titleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   title: { fontSize: 24, fontWeight: '700' },
+  settingsButton: { minWidth: 44, minHeight: 44, alignItems: 'center', justifyContent: 'center' },
+  settingsIcon: { fontSize: 22 },
   composer: { flexDirection: 'row', gap: 8 },
   input: {
     flex: 1,

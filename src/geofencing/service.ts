@@ -4,16 +4,26 @@ import * as TaskManager from 'expo-task-manager';
 import { Platform } from 'react-native';
 
 import type { Repositories } from '../db/repositories';
-import { ensureZoneAlertsChannel, ZONE_ALERTS_CHANNEL_ID } from '../permissions/service';
-import { circleBounds, type Coordinates } from '../places/geo';
+import { ALERT_CATEGORY_ID, ensureNotificationSetup } from '../notifications/setup';
+import {
+  ZONE_ALERTS_CHANNEL_ID,
+  ZONE_ALERTS_SILENT_CHANNEL_ID,
+  ZONE_ALERTS_VIBRATION,
+} from '../permissions/service';
+import { circleBounds } from '../places/geo';
+import { getLastPlanningFix, setLastPlanningFix } from '../settings/appSettings';
 import type { GeofenceNotificationData } from './handleEvent';
 import {
+  classifyMotion,
+  estimateSpeed,
   GEOFENCE_TASK_NAME,
   MAX_REGIONS,
   planningCenter,
   planRegions,
   POI_SEARCH_RADIUS_METERS,
   regionsSignature,
+  type MotionFix,
+  type MotionMode,
 } from './model';
 
 export type GeofenceSyncStatus = 'unavailable' | 'no-permission' | 'stopped' | 'unchanged' | 'registered';
@@ -22,6 +32,8 @@ export interface GeofenceSyncResult {
   status: GeofenceSyncStatus;
   /** Regiones que quedaron registradas en el sistema. */
   count: number;
+  /** Movimiento estimado al planificar (US-7.1); `'unknown'` si no hizo falta posición. */
+  motion?: MotionMode;
 }
 
 // Tras salir de la centinela el sistema acaba de calcular la posición, así que
@@ -30,21 +42,42 @@ const LAST_KNOWN_MAX_AGE_MS = 2 * 60_000;
 const FRESH_FIX_TIMEOUT_MS = 20_000;
 
 /**
+ * Convierte una posición de expo-location en `MotionFix`.
+ *
+ * @pre Ninguna.
+ * @post Copia coordenadas, velocidad (`null` si el sistema no la sabe) y momento.
+ */
+function toMotionFix(location: Location.LocationObject): MotionFix {
+  const { latitude, longitude, speed } = location.coords;
+  return { latitude, longitude, speed: speed ?? null, at: location.timestamp };
+}
+
+/**
+ * Última posición conocida, si es reciente.
+ *
+ * @pre Ninguna.
+ * @post Devuelve la posición de hace como mucho `LAST_KNOWN_MAX_AGE_MS`, o `null`.
+ */
+export async function readRecentFix(): Promise<MotionFix | null> {
+  const last = await Location.getLastKnownPositionAsync({ maxAge: LAST_KNOWN_MAX_AGE_MS }).catch(() => null);
+  return last ? toMotionFix(last) : null;
+}
+
+/**
  * Lee la posición actual con bajo consumo.
  *
  * @pre Hay permiso de ubicación.
- * @post Devuelve la última posición conocida si tiene menos de
- *       `LAST_KNOWN_MAX_AGE_MS`; si no, un fix de precisión media obtenido en
- *       menos de `FRESH_FIX_TIMEOUT_MS`; `null` si no se pudo.
+ * @post Devuelve `readRecentFix` si hay; si no, un fix de precisión media
+ *       obtenido en menos de `FRESH_FIX_TIMEOUT_MS`; `null` si no se pudo.
  */
-async function readPlanningPosition(): Promise<Coordinates | null> {
-  const last = await Location.getLastKnownPositionAsync({ maxAge: LAST_KNOWN_MAX_AGE_MS }).catch(() => null);
-  if (last) return last.coords;
+async function readPlanningPosition(): Promise<MotionFix | null> {
+  const recent = await readRecentFix();
+  if (recent) return recent;
   const fresh = await Promise.race([
     Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }).catch(() => null),
     new Promise<null>((resolve) => setTimeout(() => resolve(null), FRESH_FIX_TIMEOUT_MS)),
   ]);
-  return fresh?.coords ?? null;
+  return fresh ? toMotionFix(fresh) : null;
 }
 
 /**
@@ -59,7 +92,9 @@ async function readPlanningPosition(): Promise<Coordinates | null> {
  *       registradas ya coinciden con `planRegions`, no las vuelve a registrar
  *       (`'unchanged'`): cada registro hace que Android repita el estado actual
  *       de todas. Si no, las reemplaza (`'registered'`). Nunca registra más de
- *       `MAX_REGIONS` de la plataforma.
+ *       `MAX_REGIONS` de la plataforma. Cuando lee la posición, estima el
+ *       movimiento con la anterior (US-7.1), elige los radios según él y guarda
+ *       la posición para la próxima estimación.
  * @throws Error de expo-location si el sistema rechaza el registro (p. ej. sin
  *         ubicación precisa en Android).
  */
@@ -83,6 +118,11 @@ export async function syncGeofences(repos: Repositories): Promise<GeofenceSyncRe
         ?.regions ?? null)
     : null;
   const current = categoryIds.length > 0 || armed.length > limit ? await readPlanningPosition() : null;
+  let motion: MotionMode = 'unknown';
+  if (current) {
+    motion = classifyMotion(estimateSpeed(current, await getLastPlanningFix(repos)));
+    await setLastPlanningFix(repos, { latitude: current.latitude, longitude: current.longitude, at: current.at });
+  }
   const position = current ? planningCenter(registered, current) : null;
   const pois =
     position && categoryIds.length > 0
@@ -94,35 +134,47 @@ export async function syncGeofences(repos: Repositories): Promise<GeofenceSyncRe
     categoryTasksActive: categoryIds.length > 0,
     position,
     limit,
+    motion,
   });
 
   if (regions.length === 0) {
     if (started) await Location.stopGeofencingAsync(GEOFENCE_TASK_NAME);
-    return { status: 'stopped', count: 0 };
+    return { status: 'stopped', count: 0, motion };
   }
   if (started && regionsSignature(registered) === regionsSignature(regions)) {
-    return { status: 'unchanged', count: regions.length };
+    return { status: 'unchanged', count: regions.length, motion };
   }
   await Location.startGeofencingAsync(GEOFENCE_TASK_NAME, regions);
-  return { status: 'registered', count: regions.length };
+  return { status: 'registered', count: regions.length, motion };
 }
 
 /**
  * Muestra enseguida el aviso de una geocerca.
  *
  * @pre Ninguna.
- * @post En Android el aviso sale por el canal `ZONE_ALERTS_CHANNEL_ID` (que se
- *       crea si falta). Devuelve el id que le asignó el sistema. Si el usuario
- *       no dio permiso de notificaciones, el sistema lo descarta en silencio.
+ * @post El aviso lleva los botones «Hecho» y «Posponer 2 h» (`ALERT_CATEGORY_ID`)
+ *       y `data` para abrir o resolver las tareas. Con `data.silent` no suena ni
+ *       vibra: en Android sale por el canal de importancia baja y en iOS como
+ *       `passive`; si no, suena y vibra (`ZONE_ALERTS_VIBRATION`). Canales y
+ *       categoría se crean si faltan. Devuelve el id que le asignó el sistema.
+ *       Si el usuario no dio permiso de notificaciones, el sistema lo descarta.
  * @throws Error de expo-notifications si no se pudo programar.
  */
 export async function showGeofenceNotification(
   content: { title: string; body: string },
   data: GeofenceNotificationData,
 ): Promise<string> {
-  if (Platform.OS === 'android') await ensureZoneAlertsChannel();
+  await ensureNotificationSetup();
+  const channelId = data.silent ? ZONE_ALERTS_SILENT_CHANNEL_ID : ZONE_ALERTS_CHANNEL_ID;
   return Notifications.scheduleNotificationAsync({
-    content: { ...content, data: { ...data } },
-    trigger: Platform.OS === 'android' ? { channelId: ZONE_ALERTS_CHANNEL_ID } : null,
+    content: {
+      ...content,
+      data: { ...data },
+      categoryIdentifier: ALERT_CATEGORY_ID,
+      sound: !data.silent,
+      vibrate: data.silent ? undefined : ZONE_ALERTS_VIBRATION,
+      interruptionLevel: data.silent ? 'passive' : 'active',
+    },
+    trigger: Platform.OS === 'android' ? { channelId } : null,
   });
 }

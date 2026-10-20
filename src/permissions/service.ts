@@ -14,7 +14,14 @@ import {
 } from './model';
 
 /** Canal de Android por el que salen las alertas de geocercas. */
-export const ZONE_ALERTS_CHANNEL_ID = 'zone-alerts';
+// v2: el canal original se creó sin vibración explícita y Android no deja
+// cambiar sonido ni vibración de un canal existente (US-6.1).
+export const ZONE_ALERTS_CHANNEL_ID = 'zone-alerts-v2';
+const LEGACY_ZONE_ALERTS_CHANNEL_ID = 'zone-alerts';
+/** Patrón de vibración de los avisos: dos pulsos cortos (ms: espera, vibra, espera, vibra). */
+export const ZONE_ALERTS_VIBRATION = [0, 250, 150, 250];
+/** Canal para avisos fuera del horario de la tarea: sin sonido ni vibración (US-5.2). */
+export const ZONE_ALERTS_SILENT_CHANNEL_ID = 'zone-alerts-silent';
 
 /**
  * Reduce una respuesta de permisos de Expo a `PermissionAccess`.
@@ -130,17 +137,33 @@ export async function requestBackgroundLocation(): Promise<void> {
 }
 
 /**
- * Crea (o actualiza) el canal de Android por el que salen los avisos de zona.
+ * Crea (o actualiza) los canales de Android por los que salen los avisos de zona.
  *
  * @pre Ninguna.
- * @post Existe el canal `ZONE_ALERTS_CHANNEL_ID` con importancia alta. En iOS no
- *       hace nada.
+ * @post Existen `ZONE_ALERTS_CHANNEL_ID` (importancia alta, sonido del sistema
+ *       y vibración `ZONE_ALERTS_VIBRATION`) y `ZONE_ALERTS_SILENT_CHANNEL_ID`
+ *       (importancia baja, sin sonido ni vibración), y ya no existe el canal
+ *       original sin vibración. Android no deja cambiar el sonido de un canal ya
+ *       creado, por eso el silencio va en un canal aparte. En iOS no hace nada.
  */
 export async function ensureZoneAlertsChannel(): Promise<void> {
   await Notifications.setNotificationChannelAsync(ZONE_ALERTS_CHANNEL_ID, {
     name: 'Alertas de zona',
     description: 'Avisos al llegar o salir de un lugar con tareas pendientes',
     importance: AndroidImportance.HIGH,
+    // Sin `sound`: usa el sonido de notificación del sistema (un texto se toma
+    // como nombre de un archivo de sonido propio).
+    enableVibrate: true,
+    vibrationPattern: ZONE_ALERTS_VIBRATION,
+  });
+  await Notifications.deleteNotificationChannelAsync(LEGACY_ZONE_ALERTS_CHANNEL_ID).catch(() => undefined);
+  await Notifications.setNotificationChannelAsync(ZONE_ALERTS_SILENT_CHANNEL_ID, {
+    name: 'Alertas de zona fuera de horario',
+    description: 'Los mismos avisos, sin sonido ni vibración, fuera del horario elegido para la tarea',
+    importance: AndroidImportance.LOW,
+    sound: null,
+    enableVibrate: false,
+    vibrationPattern: null,
   });
 }
 

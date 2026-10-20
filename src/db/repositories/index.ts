@@ -4,6 +4,7 @@ import { createGeofenceTriggerRepository } from './geofenceTriggers';
 import { createLocationTargetRepository } from './locationTargets';
 import { createNotificationLogRepository } from './notificationLogs';
 import { createPoiRepository } from './pois';
+import { createSettingsRepository } from './settings';
 import { createTaskPlaceRepository } from './taskPlaces';
 import { createTaskRepository } from './tasks';
 
@@ -23,6 +24,7 @@ export function createRepositories(db: AppDatabase) {
     notificationLogs: createNotificationLogRepository(db),
     taskPlaces: createTaskPlaceRepository(db),
     pois: createPoiRepository(db),
+    settings: createSettingsRepository(db),
   };
 }
 
