@@ -8,7 +8,7 @@ import { ensureMigrated } from '../db/migrate';
 import { createRepositories } from '../db/repositories';
 import { handleGeofenceEvent } from './handleEvent';
 import { GEOFENCE_TASK_NAME, type GeofenceEvent } from './model';
-import { readRecentFix, showGeofenceNotification, syncGeofences } from './service';
+import { readAlertFix, showGeofenceNotification, syncGeofences } from './service';
 
 // Este módulo se evalúa al cargar el bundle, también cuando el sistema despierta
 // la app cerrada por una geocerca: ahí no se monta ningún componente, así que la
@@ -62,7 +62,9 @@ TaskManager.defineTask<GeofencingTaskData>(GEOFENCE_TASK_NAME, async ({ data, er
           notify: showGeofenceNotification,
           // Al salir de la centinela: nuevas geocercas de rubro alrededor de la posición actual.
           replan: () => syncGeofences(repos),
-          currentFix: readRecentFix,
+          // Posiciones precisas para confirmar que el usuario llegó antes de avisar.
+          currentFix: readAlertFix,
+          wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
           now: new Date(),
         },
         event,

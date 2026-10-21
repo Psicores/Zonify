@@ -149,6 +149,14 @@ dibujar ninguna pantalla, y Expo Router no cargue `_layout.tsx`. Las rutas viven
 El layout raíz aplica las migraciones y muestra el stack; `/permissions` es un modal protegido que
 solo existe mientras hay un pedido de permisos abierto (ver «Permisos»).
 
+**Rutas tipadas** (US-3.3, `experiments.typedRoutes` en `app.json`): Expo CLI genera los tipos en
+`.expo/types/router.d.ts` (ignorado por git) al iniciar el servidor de desarrollo o con
+`npx expo customize tsconfig.json`, que `npm run typecheck` corre antes de `tsc`. Las rutas
+dinámicas se navegan siempre como objeto, `{ pathname: '/tasks/[id]', params: { id } }`, y las
+pantallas leen sus parámetros con `useLocalSearchParams<'/tasks/[id]'>()`. TypeScript rechaza
+rutas inexistentes y parámetros faltantes o con otro nombre. Los tipos de Expo Router no detectan
+un texto como `'/tasks/[id]'` sin `params`, ni la lectura de un parámetro que la ruta no tiene.
+
 ## Lugar específico de una tarea (US-3.1)
 
 Tocar una tarea abre su detalle y, desde ahí, «Elegir lugar en el mapa» abre el selector
@@ -160,8 +168,12 @@ Tocar una tarea abre su detalle y, desde ahí, «Elegir lugar en el mapa» abre 
   [Photon](https://photon.komoot.io) (OpenStreetMap, sin clave), 350 ms después de la última tecla
   y priorizando resultados cerca del usuario. Mantener presionado el mapa elige ese punto: si hay un
   lugar conocido a ≤ 40 m se toma ese, si no queda el punto exacto («Punto en el mapa»).
-- **Radio**: presets de 100, 200 y 500 m, o arrastrando el punto del borde del círculo
-  (entre 100 m y 2 km, en pasos de 10 m).
+- **Radio de aviso**: presets de 60, 80 y 100 m, o arrastrando el punto del borde del círculo
+  (entre 60 y 100 m, en pasos de 10 m; ver «Calibración de proximidad»). El arrastre (US-3.2) aplica como mucho un cambio por
+  cuadro (`requestAnimationFrame`) y el último exacto al soltar; el polígono del círculo se
+  recalcula solo si cambian el centro o el radio (`useMemo`). El buscador, el resumen del lugar y
+  los botones son componentes memorizados (`React.memo`) que no dependen del radio, así que al
+  arrastrar solo se redibujan el círculo, el punto de arrastre y la fila del radio.
 - **Guardar** crea un `location_target` con nombre comercial, dirección legible, latitud, longitud
   y radio, y un `geofence_trigger` de entrada que lo une a la tarea, en una sola transacción
   ([`src/db/repositories/taskPlaces.ts`](src/db/repositories/taskPlaces.ts)). Cada tarea tiene un
@@ -295,16 +307,36 @@ Tocar el aviso abre el detalle de su primera tarea, también si la app estaba ce
 - **Por tarea de rubro**: una tarea no se repite en menos de 1 h aunque pase por otro local del
   rubro.
 - **Posponer**: el botón «Posponer 2 h» silencia la tarea y todo su rubro durante 2 h
-  (`tasks.snoozed_until` y `categories.snoozed_until`).
+  (`tasks.snoozed_until` y `categories.snoozed_until`): en ese lapso no sale ningún aviso de esas
+  tareas, ni en el mismo local ni en otro del rubro. Al vencer, la posposición **corta el
+  enfriamiento** del aviso pospuesto (`isCoolingDown`, US-1.2): el siguiente paso por el mismo local
+  o lugar vuelve a avisar a las 2 h, no a las 12. Solo cuenta una posposición posterior al último
+  aviso; sin posponer, el enfriamiento sigue siendo el configurado.
 
 ### Acciones desde el aviso (US-6.3)
 
-Los avisos tienen los botones **Hecho** (completa las tareas del aviso, re-registra las geocercas
-—así se cancelan las suyas— y lo quita de la bandeja) y **Posponer 2 h**. Ninguno abre la app: en
-Android, con la app en segundo plano o cerrada, los procesa la tarea
-`zonify-notification-actions` (`Notifications.registerTaskAsync`), que despierta solo el JS;
-con la app abierta, `NotificationResponses`. Las acciones son idempotentes. La lógica está en
+Los avisos tienen los botones **Hecho** (completa las tareas del aviso y re-registra las geocercas,
+así se cancelan las suyas) y **Posponer 2 h**. Ninguno abre la app: en Android, con la app en
+segundo plano o cerrada, los procesa la tarea `zonify-notification-actions`, que despierta solo el
+JS; con la app abierta, `NotificationResponses`. La lógica está en
 [`src/notifications/actions.ts`](src/notifications/actions.ts).
+
+Detalles que importan (US-1.1, fase de hardening):
+
+- **Datos del aviso**: a la tarea de fondo de Android los datos de un aviso local le llegan como
+  texto en `content.dataString`, no en `content.data` (expo-notifications solo los convierte para
+  los oyentes de React). `notificationContentData` lee cualquiera de los dos; antes la tarea no
+  encontraba las tareas del aviso y no hacía nada.
+- **El aviso se quita primero**: Android no lo saca de la bandeja al tocar un botón, así que se
+  llama a `dismissNotificationAsync` antes de migrar y de esperar en `eventQueue`. Si la
+  re-sincronización de geocercas falla, la tarea igual queda completada.
+- **Registro al cargar el bundle**: `registerTaskAsync` se llama desde
+  [`src/notifications/background.ts`](src/notifications/background.ts) (importado por `index.ts`),
+  no desde una pantalla.
+- **Una sola vez por respuesta**: Android entrega la respuesta a la tarea de fondo y, si no había
+  pantallas montadas, otra vez a la app al abrirla. `claimAlertResponse` guarda en `app_settings`
+  las últimas 50 respuestas atendidas (`<id del aviso>/<acción>`) y la segunda se descarta, para no
+  correr una posposición.
 
 ## Batería y robustez (épica 7)
 
@@ -316,11 +348,33 @@ lee al planificar las geocercas: la que informa el sistema o, si no la hay, dist
 desde la posición de la planificación anterior (≤ 15 min). Como la centinela se dispara al
 moverse 500 m, dos salidas seguidas dan una buena estimación.
 
-| Modo | Velocidad | Geocerca de local | Centinela |
-| --- | --- | --- | --- |
-| Quieto | < 0,5 m/s | 100 m | 500 m |
-| A pie | 0,5–7 m/s | 100 m | 500 m |
-| En vehículo | ≥ 7 m/s (~25 km/h) | 250 m (tiempo de reacción) | 1,5 km (menos despertares) |
+| Modo | Velocidad | Aviso de local | Geocerca de local | Centinela |
+| --- | --- | --- | --- | --- |
+| Quieto | < 0,5 m/s | 80 m | 125 m | 500 m |
+| A pie | 0,5–7 m/s | 80 m | 125 m | 500 m |
+| En vehículo | ≥ 7 m/s (~25 km/h) | 100 m | 250 m (tiempo de reacción) | 1,5 km (menos despertares) |
+
+### Calibración de proximidad (avisos a 60–100 m)
+
+Antes los avisos podían saltar a ~200 m: la geocerca del lugar era de 200 m (la de un local, de
+100 m) y el sistema le suma el error de la posición. Ahora hay dos radios:
+
+- **Radio de aviso**: a qué distancia de la puerta se avisa. En los lugares propios lo elige el
+  usuario entre 60, 80 (por defecto) y 100 m; los guardados con más (antes se admitía hasta 2 km)
+  cuentan como 100 m. En los locales de rubro es 80 m, o 100 m en vehículo.
+- **Geocerca del sistema**: el radio de aviso más 45 m, nunca menos de 100 m
+  (`systemGeofenceRadius`). Android recomienda geocercas de 100–150 m o más; por debajo fallan
+  seguido. La geocerca solo despierta a la app con margen.
+
+Al entrar, `confirmProximity` ([`handleEvent.ts`](src/geofencing/handleEvent.ts)) pide hasta 4
+posiciones, 20 s entre una y otra (`readAlertFix`: la última conocida si es de ≤ 30 s y con error
+≤ 45 m, si no una de alta precisión de ≤ 15 s), y avisa en cuanto una con error ≤ 45 m está dentro
+del radio de aviso. Una posición con más error (un salto de antena) o fuera del radio no avisa; si
+en ~1 minuto no se confirma, el evento termina sin aviso (`'precisión insuficiente'` o
+`'todavía lejos'`). Al salir de un lugar no hace falta confirmar nada.
+
+Limitación: si la confirmación falla y el usuario se queda dentro de la geocerca, el sistema no
+vuelve a avisar «entrar» hasta que salga y vuelva a entrar.
 
 Desde ~80 km/h no se avisa por locales de rubro (falsos positivos en autopista). Quieto no cambia
 nada porque no hay nada que apagar: la app no consulta el GPS ni corre en segundo plano; solo

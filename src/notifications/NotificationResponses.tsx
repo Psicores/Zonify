@@ -6,19 +6,20 @@ import { eventQueue } from '../background/serial';
 import { db } from '../db/client';
 import { createRepositories } from '../db/repositories';
 import { syncGeofences } from '../geofencing/service';
-import { handleAlertAction, routeForAlert } from './actions';
-import { NOTIFICATION_ACTION_TASK_NAME } from './background';
+import { alertResponseKey, handleAlertAction, routeForAlert } from './actions';
 import { ensureNotificationSetup } from './setup';
 
 /**
  * Atiende los toques en los avisos (US-6.1, US-6.3). No dibuja nada.
  *
- * @pre Se monta dentro del layout raíz de Expo Router, con las migraciones aplicadas.
- * @post Al montarse deja listos canales y botones y registra la tarea de fondo
- *       de acciones. Tocar un aviso (también si abrió la app desde cerrada)
- *       navega al detalle de su primera tarea; tocar «Hecho» o «Posponer» con la
- *       app abierta ejecuta `handleAlertAction`. Cada respuesta se atiende una
- *       sola vez. Los fallos se informan en la consola.
+ * @pre Se monta dentro del layout raíz de Expo Router, con las migraciones
+ *      aplicadas. La tarea de fondo de acciones se registra al cargar el bundle
+ *      (`./background`).
+ * @post Al montarse deja listos canales y botones. Tocar un aviso (también si
+ *       abrió la app desde cerrada) navega al detalle de su primera tarea; tocar
+ *       «Hecho» o «Posponer» con la app abierta quita el aviso enseguida y
+ *       ejecuta `handleAlertAction`, que no repite una respuesta que ya atendió
+ *       la tarea de fondo. Los fallos se informan en la consola.
  */
 export function NotificationResponses() {
   const repos = useMemo(() => createRepositories(db), []);
@@ -28,15 +29,12 @@ export function NotificationResponses() {
 
   useEffect(() => {
     ensureNotificationSetup().catch((e: unknown) => console.warn('[avisos] no se pudo configurar:', e));
-    Notifications.registerTaskAsync(NOTIFICATION_ACTION_TASK_NAME).catch((e: unknown) =>
-      console.warn('[avisos] no se pudo registrar la tarea de acciones:', e),
-    );
   }, []);
 
   useEffect(() => {
     if (!response) return;
     const { identifier, content } = response.notification.request;
-    const key = `${identifier}/${response.actionIdentifier}`;
+    const key = alertResponseKey(identifier, response.actionIdentifier);
     if (handled.current.has(key)) return;
     handled.current.add(key);
 
@@ -46,18 +44,15 @@ export function NotificationResponses() {
       Notifications.clearLastNotificationResponse();
       return;
     }
+    // Primero el aviso: Android no lo quita al tocar un botón (US-1.1).
+    Notifications.dismissNotificationAsync(identifier).catch(() => undefined);
     // Misma cola que los eventos de geocercas y que los botones con la app cerrada (US-2.1).
     eventQueue(() =>
       handleAlertAction(
-        {
-          repos,
-          resync: () => syncGeofences(repos),
-          dismiss: Notifications.dismissNotificationAsync,
-          now: new Date(),
-        },
+        { repos, resync: () => syncGeofences(repos), now: new Date() },
         response.actionIdentifier,
         content.data,
-        identifier,
+        key,
       ),
     )
       .then((outcome) => {

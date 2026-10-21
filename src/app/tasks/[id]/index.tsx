@@ -11,7 +11,7 @@ import { TaskDetailScreen } from '../../../screens/TaskDetailScreen';
  *       mensaje de error.
  */
 export default function TaskDetailRoute() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id } = useLocalSearchParams<'/tasks/[id]'>();
   const taskId = Number(id);
 
   if (!Number.isInteger(taskId) || taskId <= 0) {

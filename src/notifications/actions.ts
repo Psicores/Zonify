@@ -1,19 +1,20 @@
+import type { Href } from 'expo-router';
+
 import type { Repositories } from '../db/repositories';
-import { SNOOZE_MS } from '../settings/appSettings';
+import { claimAlertResponse, SNOOZE_MS } from '../settings/appSettings';
 import { ALERT_ACTIONS } from './setup';
 
 export interface AlertActionDeps {
   repos: Repositories;
   /** Vuelve a registrar las geocercas (las de tareas completadas desaparecen). */
   resync: () => Promise<unknown>;
-  /** Quita el aviso de la bandeja de notificaciones. */
-  dismiss: (notificationId: string) => Promise<void>;
   now: Date;
 }
 
 export type AlertActionOutcome =
   | { kind: 'ignored' }
-  | { kind: 'completed'; taskIds: number[]; changed: number }
+  | { kind: 'duplicate' }
+  | { kind: 'completed'; taskIds: number[]; changed: number; resynced: boolean }
   | { kind: 'snoozed'; taskIds: number[]; until: Date };
 
 /**
@@ -30,48 +31,83 @@ export function alertTaskIds(data: unknown): number[] {
 }
 
 /**
- * Pantalla que abre tocar un aviso (US-6.1).
+ * Datos de un aviso a partir de su contenido (US-1.1).
  *
  * @pre Ninguna.
- * @post Devuelve `/tasks/<id>` de la primera tarea del aviso, o `null` si no trae tareas.
+ * @post Devuelve `content.data` si está. Si no, `content.dataString` interpretado
+ *       como JSON: así llegan los datos de un aviso local a la tarea de fondo de
+ *       Android, porque expo-notifications solo los convierte para los oyentes
+ *       de React. `null` si no hay datos o el JSON es inválido.
  */
-export function routeForAlert(data: unknown): string | null {
-  const [first] = alertTaskIds(data);
-  return first === undefined ? null : `/tasks/${first}`;
+export function notificationContentData(content: unknown): unknown {
+  const fields = content as { data?: unknown; dataString?: unknown } | null | undefined;
+  if (fields?.data != null) return fields.data;
+  if (typeof fields?.dataString !== 'string') return null;
+  try {
+    return JSON.parse(fields.dataString) as unknown;
+  } catch {
+    return null;
+  }
 }
 
 /**
- * Ejecuta un botón de un aviso sin abrir la app (US-6.3).
+ * Clave que identifica una respuesta a un aviso, para atenderla una sola vez.
+ *
+ * @pre Ninguna.
+ * @post Devuelve `<id del aviso>/<acción>`.
+ */
+export function alertResponseKey(notificationId: string, action: string): string {
+  return `${notificationId}/${action}`;
+}
+
+/**
+ * Pantalla que abre tocar un aviso (US-6.1), como ruta tipada (US-3.3).
+ *
+ * @pre Ninguna.
+ * @post Devuelve el detalle (`/tasks/[id]`) de la primera tarea del aviso, o
+ *       `null` si no trae tareas.
+ */
+export function routeForAlert(data: unknown): Href | null {
+  const [first] = alertTaskIds(data);
+  return first === undefined ? null : { pathname: '/tasks/[id]', params: { id: first } };
+}
+
+/**
+ * Ejecuta un botón de un aviso sin abrir la app (US-6.3, US-1.1). Quitar el
+ * aviso de la bandeja le toca a quien llama, antes de esperar en `eventQueue`.
  *
  * @pre Las migraciones están aplicadas.
- * @post `'complete'`: las tareas pendientes del aviso quedan completadas, se
- *       re-registran las geocercas (así se cancelan las suyas) y se quita el
- *       aviso. `'snooze'`: las tareas y sus rubros quedan pospuestos
- *       `SNOOZE_MS` (US-6.2) y se quita el aviso. Repetir la misma acción no
- *       cambia el resultado. Otra acción, o un aviso sin tareas: `'ignored'`.
- * @throws Errores de la base de datos o de `resync`; quitar el aviso nunca falla.
+ * @post Otra acción, o un aviso sin tareas: `'ignored'` sin escribir. Si la
+ *       respuesta `responseKey` ya se atendió (Android la entrega a la tarea de
+ *       fondo y otra vez a la app al abrirla): `'duplicate'` sin escribir.
+ *       `'complete'`: las tareas pendientes del aviso quedan completadas con
+ *       `completedAt = now` y se re-registran las geocercas (así se cancelan las
+ *       suyas); si eso falla, la tarea igual queda completada y `resynced` es
+ *       `false`. `'snooze'`: las tareas y sus rubros quedan pospuestos
+ *       `SNOOZE_MS` (US-6.2).
+ * @throws Errores de la base de datos.
  */
 export async function handleAlertAction(
   deps: AlertActionDeps,
   action: string,
   data: unknown,
-  notificationId: string,
+  responseKey: string,
 ): Promise<AlertActionOutcome> {
   const taskIds = alertTaskIds(data);
   if (taskIds.length === 0) return { kind: 'ignored' };
+  if (action !== ALERT_ACTIONS.complete && action !== ALERT_ACTIONS.snooze) return { kind: 'ignored' };
   const { repos, now } = deps;
+  if (!(await claimAlertResponse(repos, responseKey))) return { kind: 'duplicate' };
 
   if (action === ALERT_ACTIONS.complete) {
     const changed = await repos.tasks.completeMany(taskIds, now);
-    await deps.resync();
-    await deps.dismiss(notificationId).catch(() => undefined);
-    return { kind: 'completed', taskIds, changed };
+    const resynced = await deps.resync().then(
+      () => true,
+      () => false,
+    );
+    return { kind: 'completed', taskIds, changed, resynced };
   }
-  if (action === ALERT_ACTIONS.snooze) {
-    const until = new Date(now.getTime() + SNOOZE_MS);
-    repos.tasks.snooze(taskIds, until);
-    await deps.dismiss(notificationId).catch(() => undefined);
-    return { kind: 'snoozed', taskIds, until };
-  }
-  return { kind: 'ignored' };
+  const until = new Date(now.getTime() + SNOOZE_MS);
+  repos.tasks.snooze(taskIds, until);
+  return { kind: 'snoozed', taskIds, until };
 }

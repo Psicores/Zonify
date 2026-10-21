@@ -12,6 +12,9 @@ export const SNOOZE_MS = 2 * 60 * 60_000;
 const POI_COOLDOWN_KEY = 'notifications.poiCooldownHours';
 const LAST_FIX_KEY = 'motion.lastPlanningFix';
 const PERMISSION_SKIPS_KEY = 'permissions.skippedUntil';
+const HANDLED_RESPONSES_KEY = 'notifications.handledResponses';
+// Alcanza de sobra: una respuesta repetida llega como mucho al abrir la app.
+const HANDLED_RESPONSES_LIMIT = 50;
 const PERMISSION_GROUPS: readonly PermissionGroup[] = ['location', 'notifications', 'battery'];
 
 /** Posición con la que se planificaron las geocercas por última vez. */
@@ -71,6 +74,29 @@ export async function getLastPlanningFix(repos: Repositories): Promise<PlanningF
  */
 export async function setLastPlanningFix(repos: Repositories, fix: PlanningFix): Promise<void> {
   await repos.settings.set(LAST_FIX_KEY, JSON.stringify(fix));
+}
+
+/**
+ * Marca una respuesta a un aviso como atendida, si no lo estaba (US-1.1).
+ *
+ * @pre Se llama dentro de `eventQueue`, para que dos llamadas con la misma
+ *      clave no lean a la vez.
+ * @post Devuelve `true` y la guarda si `key` no estaba entre las últimas
+ *       `HANDLED_RESPONSES_LIMIT` atendidas; si estaba, devuelve `false` sin
+ *       cambiar nada. Un valor guardado mal formado cuenta como vacío.
+ */
+export async function claimAlertResponse(repos: Repositories, key: string): Promise<boolean> {
+  let handled: string[] = [];
+  try {
+    const raw = await repos.settings.get(HANDLED_RESPONSES_KEY);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    if (Array.isArray(parsed)) handled = parsed.filter((item): item is string => typeof item === 'string');
+  } catch {
+    handled = [];
+  }
+  if (handled.includes(key)) return false;
+  await repos.settings.set(HANDLED_RESPONSES_KEY, JSON.stringify([...handled, key].slice(-HANDLED_RESPONSES_LIMIT)));
+  return true;
 }
 
 /**

@@ -1,5 +1,6 @@
 import type { GeofenceState, GeofenceTrigger, LocationTarget, Poi, PoiArea, Task } from '../db/schema';
 import { distanceMeters, type Coordinates } from '../places/geo';
+import { clampRadius } from '../places/model';
 
 /** Nombre de la tarea de fondo que recibe las transiciones de geocerca. */
 export const GEOFENCE_TASK_NAME = 'zonify-geofences';
@@ -36,17 +37,47 @@ export const VEHICLE_MIN_SPEED_MPS = 7;
 export const HIGHWAY_SPEED_MPS = 22;
 
 /**
- * Radios según el movimiento (US-7.1). A pie, geocercas de local ajustadas
- * (100 m) y centinela de 500 m. En vehículo, locales de 250 m para dar tiempo a
- * reaccionar con la latencia del sistema, y centinela de 1,5 km para no despertar
- * la app cada pocas cuadras. Quieto no cambia nada: la app no consulta el GPS
- * y las geocercas del sistema son pasivas (celdas y Wi-Fi).
+ * Error máximo (m) de una posición para confiar en ella al avisar: con más, un
+ * cambio de antena puede «acercar» al usuario 200-300 m (calibración de proximidad).
  */
-export const MOTION_PROFILES: Record<MotionMode, { poiRadius: number; sentinelRadius: number }> = {
-  still: { poiRadius: 100, sentinelRadius: 500 },
-  walking: { poiRadius: 100, sentinelRadius: 500 },
-  vehicle: { poiRadius: 250, sentinelRadius: 1500 },
-  unknown: { poiRadius: 100, sentinelRadius: 500 },
+export const ALERT_MAX_ACCURACY_METERS = 45;
+/** Geocerca del sistema más chica que se registra: por debajo, Android e iOS fallan seguido. */
+export const MIN_SYSTEM_GEOFENCE_METERS = 100;
+/** Posiciones que se piden, como mucho, para confirmar la cercanía antes de avisar. */
+export const PROXIMITY_CHECK_ATTEMPTS = 4;
+/** Espera entre esas posiciones: a pie, 20 s son unos 30 m. */
+export const PROXIMITY_RETRY_MS = 20_000;
+
+/**
+ * Radio de la geocerca que se registra en el sistema para un radio de aviso.
+ *
+ * @pre `alertRadius` > 0.
+ * @post Devuelve `alertRadius + ALERT_MAX_ACCURACY_METERS`, nunca menos de
+ *       `MIN_SYSTEM_GEOFENCE_METERS`: la geocerca solo despierta a la app con
+ *       margen, y el aviso sale cuando una posición precisa confirma que el
+ *       usuario está a `alertRadius` o menos.
+ */
+export function systemGeofenceRadius(alertRadius: number): number {
+  return Math.max(MIN_SYSTEM_GEOFENCE_METERS, alertRadius + ALERT_MAX_ACCURACY_METERS);
+}
+
+/**
+ * Radios según el movimiento (US-7.1). `poiAlertRadius` es a qué distancia de
+ * un local de rubro se avisa; `poiRadius`, la geocerca que se registra para él
+ * (ver `systemGeofenceRadius`). A pie, aviso a 80 m y centinela de 500 m. En
+ * vehículo, aviso a 100 m con geocerca de 250 m para despertar a tiempo con la
+ * latencia del sistema, y centinela de 1,5 km para no despertar la app cada
+ * pocas cuadras. Quieto no cambia nada: la app no consulta el GPS y las
+ * geocercas del sistema son pasivas (celdas y Wi-Fi).
+ */
+export const MOTION_PROFILES: Record<
+  MotionMode,
+  { poiAlertRadius: number; poiRadius: number; sentinelRadius: number }
+> = {
+  still: { poiAlertRadius: 80, poiRadius: systemGeofenceRadius(80), sentinelRadius: 500 },
+  walking: { poiAlertRadius: 80, poiRadius: systemGeofenceRadius(80), sentinelRadius: 500 },
+  vehicle: { poiAlertRadius: 100, poiRadius: 250, sentinelRadius: 1500 },
+  unknown: { poiAlertRadius: 80, poiRadius: systemGeofenceRadius(80), sentinelRadius: 500 },
 };
 
 /** Las dos posiciones usadas para estimar la velocidad no pueden estar más separadas que esto. */
@@ -193,8 +224,10 @@ export interface RegionPlanInput {
  *       admite) entran todos si alcanza el lugar; si no, los más cercanos (sin
  *       posición, los más recientes), reservando a los locales al menos
  *       `MIN_POI_SLOTS` lugares o los que falten. Lugares y locales avisan al
- *       entrar y al salir (para mantener el estado al día). El resultado está
- *       ordenado por `identifier`.
+ *       entrar y al salir (para mantener el estado al día). Los radios son los
+ *       de la geocerca del sistema: el de aviso más margen
+ *       (`systemGeofenceRadius`) en los lugares, `poiRadius` en los locales.
+ *       El resultado está ordenado por `identifier`.
  */
 export function planRegions(input: RegionPlanInput): GeofenceRegion[] {
   const { position, limit } = input;
@@ -236,7 +269,8 @@ export function planRegions(input: RegionPlanInput): GeofenceRegion[] {
       identifier: regionIdentifier(trigger.id),
       latitude: locationTarget.latitude,
       longitude: locationTarget.longitude,
-      radius: locationTarget.radiusMeters,
+      // El radio guardado es el de aviso; la geocerca lleva margen (ver `systemGeofenceRadius`).
+      radius: systemGeofenceRadius(clampRadius(locationTarget.radiusMeters)),
       notifyOnEnter: true,
       notifyOnExit: true,
     })),
@@ -345,35 +379,70 @@ export function isSnoozed(until: Date | null | undefined, now: Date): boolean {
 }
 
 /**
+ * La más tardía de varias fechas.
+ *
+ * @pre Ninguna.
+ * @post Devuelve la fecha más tardía, o `null` si no hay ninguna.
+ */
+export function latestDate(...dates: (Date | null | undefined)[]): Date | null {
+  return dates.reduce<Date | null>((latest, date) => (date && (!latest || date > latest) ? date : latest), null);
+}
+
+/**
+ * Indica si un lugar o local sigue en enfriamiento después de avisar (US-6.2),
+ * contando con una posposición posterior al aviso (US-1.2).
+ *
+ * @pre `cooldownMs` ≥ 0.
+ * @post Sin aviso previo devuelve `false`. Si no, el enfriamiento termina
+ *       `cooldownMs` después de `lastNotifiedAt`; pero si `snoozedUntil` es
+ *       posterior al aviso (el usuario lo pospuso), termina al vencer la
+ *       posposición cuando eso es antes: «Posponer 2 h» vuelve a avisar a las
+ *       2 h aunque el enfriamiento sea de 12 h. Devuelve `true` si `now` es
+ *       anterior a ese fin.
+ */
+export function isCoolingDown(
+  lastNotifiedAt: Date | null,
+  cooldownMs: number,
+  snoozedUntil: Date | null,
+  now: Date,
+): boolean {
+  if (lastNotifiedAt === null) return false;
+  let ends = lastNotifiedAt.getTime() + cooldownMs;
+  if (snoozedUntil && snoozedUntil > lastNotifiedAt) ends = Math.min(ends, snoozedUntil.getTime());
+  return now.getTime() < ends;
+}
+
+/**
  * Decide qué hacer con una transición informada por el sistema operativo.
  *
  * @pre `now` y `lastNotifiedAt` están en la misma escala de tiempo; `cooldownMs` ≥ 0.
  * @post `nextState` es `'inside'` al entrar y `'outside'` al salir. `notify` es
  *       `true` solo si el trigger está activo, su tarea pendiente y no
- *       pospuesta (`snoozed`), la transición coincide con la del trigger, el
- *       estado anterior no era ya el nuevo (al registrar las regiones Android
- *       repite el estado actual, y eso no es un cruce) y no hubo otro aviso del
- *       trigger en los últimos `cooldownMs` (US-6.2).
+ *       pospuesta (`snoozedUntil` posterior a `now`, de la tarea o su rubro),
+ *       la transición coincide con la del trigger, el estado anterior no era ya
+ *       el nuevo (al registrar las regiones Android repite el estado actual, y
+ *       eso no es un cruce) y el trigger no está en enfriamiento
+ *       (`isCoolingDown`: `cooldownMs` desde su último aviso, o hasta que venza
+ *       una posposición posterior a ese aviso, US-6.2 y US-1.2).
  */
 export function decideGeofenceEvent(input: {
   event: GeofenceEvent;
   trigger: GeofenceTrigger;
   taskStatus: Task['status'];
-  snoozed: boolean;
+  snoozedUntil: Date | null;
   lastNotifiedAt: Date | null;
   cooldownMs: number;
   now: Date;
 }): GeofenceDecision {
-  const { event, trigger, taskStatus, snoozed, lastNotifiedAt, cooldownMs, now } = input;
+  const { event, trigger, taskStatus, snoozedUntil, lastNotifiedAt, cooldownMs, now } = input;
   const nextState: GeofenceState = event === 'enter' ? 'inside' : 'outside';
-  const coolingDown = lastNotifiedAt !== null && now.getTime() - lastNotifiedAt.getTime() < cooldownMs;
   const notify =
     trigger.isActive &&
     taskStatus === 'pending' &&
-    !snoozed &&
+    !isSnoozed(snoozedUntil, now) &&
     trigger.transition === event &&
     trigger.lastState !== nextState &&
-    !coolingDown;
+    !isCoolingDown(lastNotifiedAt, cooldownMs, snoozedUntil, now);
   return { nextState, notify };
 }
 
@@ -422,12 +491,29 @@ export function alertContent(input: {
   return { title, body: joinSpanish(taskTitles) };
 }
 
-/** Posición con velocidad y momento, como la entrega expo-location. */
+/** Posición con velocidad, precisión y momento, como la entrega expo-location. */
 export interface MotionFix extends Coordinates {
   /** Velocidad informada por el sistema en m/s; `null` o negativa si no la sabe. */
   speed: number | null;
+  /** Radio de error en metros; `null` si el sistema no lo informa. */
+  accuracy: number | null;
   /** Momento de la posición, en ms desde epoch. */
   at: number;
+}
+
+export type ProximityVerdict = 'near' | 'far' | 'imprecise';
+
+/**
+ * Juzga si una posición confirma que el usuario está cerca de un lugar.
+ *
+ * @pre `alertRadius` > 0.
+ * @post `'imprecise'` sin posición o con un error mayor a
+ *       `ALERT_MAX_ACCURACY_METERS` (o desconocido); si no, `'near'` a
+ *       `alertRadius` o menos del lugar y `'far'` más lejos.
+ */
+export function judgeProximity(fix: MotionFix | null, point: Coordinates, alertRadius: number): ProximityVerdict {
+  if (!fix || fix.accuracy === null || fix.accuracy > ALERT_MAX_ACCURACY_METERS) return 'imprecise';
+  return distanceMeters(fix, point) <= alertRadius ? 'near' : 'far';
 }
 
 /**

@@ -11,7 +11,7 @@ import { PlacePickerScreen } from '../../../screens/PlacePickerScreen';
  *       mensaje de error.
  */
 export default function TaskPlaceRoute() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id } = useLocalSearchParams<'/tasks/[id]/place'>();
   const taskId = Number(id);
 
   if (!Number.isInteger(taskId) || taskId <= 0) {

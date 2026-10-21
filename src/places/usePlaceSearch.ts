@@ -14,6 +14,8 @@ interface SearchState {
 
 // Espera tras la última tecla antes de buscar: evita una petición por letra.
 const DEBOUNCE_MS = 350;
+// Siempre la misma lista vacía, para que los componentes memorizados no se redibujen.
+const NO_RESULTS: readonly PlaceCandidate[] = [];
 
 /**
  * Autocompletado de lugares mientras el usuario escribe.
@@ -24,7 +26,8 @@ const DEBOUNCE_MS = 350;
  *       (cancelando la búsqueda anterior), priorizando resultados cerca de
  *       (`nearLatitude`, `nearLongitude`) si ambos vienen. `status` es
  *       `'loading'` hasta que llega la respuesta del texto actual, y luego
- *       `'done'` con `results` o `'error'`.
+ *       `'done'` con `results` o `'error'`. `results` conserva su identidad
+ *       mientras no cambie (vacía es siempre el mismo arreglo).
  */
 export function usePlaceSearch(query: string, nearLatitude: number | null, nearLongitude: number | null) {
   const [state, setState] = useState<SearchState>({ query: '', results: [], failed: false });
@@ -58,5 +61,5 @@ export function usePlaceSearch(query: string, nearLatitude: number | null, nearL
       : state.failed
         ? 'error'
         : 'done';
-  return { status, results: status === 'done' ? state.results : [] };
+  return { status, results: status === 'done' ? state.results : NO_RESULTS };
 }

@@ -179,7 +179,7 @@ function TaskDetailForm({ task, place, categories }: TaskDetailFormProps) {
           )}
           <Pressable
             style={({ pressed }) => [styles.secondary, pressed && styles.pressed]}
-            onPress={() => router.push(`/tasks/${task.id}/place`)}
+            onPress={() => router.push({ pathname: '/tasks/[id]/place', params: { id: task.id } })}
             accessibilityRole="button"
           >
             <Text style={styles.secondaryText}>{place ? 'Cambiar lugar' : 'Elegir lugar en el mapa'}</Text>

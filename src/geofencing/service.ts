@@ -15,6 +15,7 @@ import { circleBounds } from '../places/geo';
 import { getLastPlanningFix, setLastPlanningFix } from '../settings/appSettings';
 import type { GeofenceNotificationData } from './handleEvent';
 import {
+  ALERT_MAX_ACCURACY_METERS,
   classifyMotion,
   estimateSpeed,
   GEOFENCE_TASK_NAME,
@@ -41,6 +42,10 @@ export interface GeofenceSyncResult {
 // suele haber una reciente; si no, se pide una con precisión de barrio.
 const LAST_KNOWN_MAX_AGE_MS = 2 * 60_000;
 const FRESH_FIX_TIMEOUT_MS = 20_000;
+// Para confirmar un aviso: una posición de hace más de 30 s ya puede estar a
+// 40 m caminando; y una nueva no puede demorar el aviso más de 15 s.
+const ALERT_FIX_MAX_AGE_MS = 30_000;
+const ALERT_FIX_TIMEOUT_MS = 15_000;
 
 /**
  * Convierte una posición de expo-location en `MotionFix`.
@@ -49,8 +54,8 @@ const FRESH_FIX_TIMEOUT_MS = 20_000;
  * @post Copia coordenadas, velocidad (`null` si el sistema no la sabe) y momento.
  */
 function toMotionFix(location: Location.LocationObject): MotionFix {
-  const { latitude, longitude, speed } = location.coords;
-  return { latitude, longitude, speed: speed ?? null, at: location.timestamp };
+  const { latitude, longitude, speed, accuracy } = location.coords;
+  return { latitude, longitude, speed: speed ?? null, accuracy: accuracy ?? null, at: location.timestamp };
 }
 
 /**
@@ -62,6 +67,29 @@ function toMotionFix(location: Location.LocationObject): MotionFix {
 export async function readRecentFix(): Promise<MotionFix | null> {
   const last = await Location.getLastKnownPositionAsync({ maxAge: LAST_KNOWN_MAX_AGE_MS }).catch(() => null);
   return last ? toMotionFix(last) : null;
+}
+
+/**
+ * Posición para confirmar que el usuario está cerca antes de avisar.
+ *
+ * @pre Hay permiso de ubicación.
+ * @post Devuelve la última posición conocida si es de hace `ALERT_FIX_MAX_AGE_MS`
+ *       o menos y su error no supera `ALERT_MAX_ACCURACY_METERS` (suele ser la
+ *       que acaba de calcular el sistema para la geocerca). Si no, pide una de
+ *       alta precisión que tarde como mucho `ALERT_FIX_TIMEOUT_MS`; si tampoco
+ *       llega, devuelve `readRecentFix` (aunque sea imprecisa) o `null`.
+ */
+export async function readAlertFix(): Promise<MotionFix | null> {
+  const precise = await Location.getLastKnownPositionAsync({
+    maxAge: ALERT_FIX_MAX_AGE_MS,
+    requiredAccuracy: ALERT_MAX_ACCURACY_METERS,
+  }).catch(() => null);
+  if (precise) return toMotionFix(precise);
+  const fresh = await Promise.race([
+    Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.High }).catch(() => null),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), ALERT_FIX_TIMEOUT_MS)),
+  ]);
+  return fresh ? toMotionFix(fresh) : readRecentFix();
 }
 
 /**

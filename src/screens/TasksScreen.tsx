@@ -307,7 +307,7 @@ export function TasksScreen() {
             left={toSwipeAction(swipe.left, () => applyAction(item.task, swipe.left))}
             onSwipeStart={() => setScrollEnabled(false)}
             onSwipeEnd={() => setScrollEnabled(true)}
-            onPress={() => router.push(`/tasks/${item.task.id}`)}
+            onPress={() => router.push({ pathname: '/tasks/[id]', params: { id: item.task.id } })}
             pressHint="Abre la tarea para elegir dónde y cuándo avisa"
           >
             <TaskRow

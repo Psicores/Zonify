@@ -1,12 +1,15 @@
 import { distanceMeters, type Coordinates } from './geo';
 
+// Radio de AVISO de un lugar (calibración de proximidad): a qué distancia de la
+// puerta se avisa, confirmada con una posición precisa. La geocerca que se
+// registra en el sistema es más grande (`systemGeofenceRadius`), porque por
+// debajo de ~100 m las de Android e iOS fallan seguido.
 /** Radios rápidos del selector, en metros. */
-export const RADIUS_PRESETS = [100, 200, 500] as const;
-export const DEFAULT_RADIUS_METERS = 200;
-// Por debajo de ~100 m las geocercas de Android e iOS fallan seguido; por
-// encima de 2 km el aviso deja de ser «estás ahí».
-export const MIN_RADIUS_METERS = 100;
-export const MAX_RADIUS_METERS = 2000;
+export const RADIUS_PRESETS = [60, 80, 100] as const;
+export const DEFAULT_RADIUS_METERS = 80;
+export const MIN_RADIUS_METERS = 60;
+// Más lejos, el aviso llega con el comercio a dos cuadras.
+export const MAX_RADIUS_METERS = 100;
 
 /**
  * Distancia máxima entre el punto presionado y el lugar conocido más cercano
@@ -57,7 +60,8 @@ interface PhotonFeature {
  *
  * @pre `meters` es un número finito.
  * @post Devuelve `meters` redondeado a decenas y acotado a
- *       [`MIN_RADIUS_METERS`, `MAX_RADIUS_METERS`].
+ *       [`MIN_RADIUS_METERS`, `MAX_RADIUS_METERS`]. Los lugares guardados con
+ *       un radio mayor (antes se admitía hasta 2 km) quedan en el máximo.
  */
 export function clampRadius(meters: number): number {
   const rounded = Math.round(meters / 10) * 10;

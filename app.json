@@ -46,8 +46,19 @@
       ],
       "expo-router",
       "@maplibre/maplibre-react-native",
-      "expo-background-task"
+      "expo-background-task",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "extraProguardRules": "# Room crea las bases por reflexión (<Base>_Impl): WorkManager, que usan\n# expo-background-task y expo-task-manager, se cierra al arrancar si R8 las quita.\n-keep class * extends androidx.room.RoomDatabase { <init>(); }"
+          }
+        }
+      ]
     ],
-    "scheme": "zonify"
+    "scheme": "zonify",
+    "experiments": {
+      "typedRoutes": true
+    }
   }
 }
